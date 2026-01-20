@@ -17,6 +17,9 @@ import (
 	"github.com/tcaine/twamp"
 )
 
+// API Version
+const API_VERSION = "2.1.0"
+
 // iperf3 Protocol Constants
 const (
 	// Protocol States
@@ -662,7 +665,7 @@ func jsonResponse(w http.ResponseWriter, resp ApiResponse, status int) {
 func getAPIDoc() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "Network Test API",
-		"version":     "2.0.0",
+		"version":     API_VERSION,
 		"description": "API for network performance testing with native iperf3 protocol support",
 		"endpoints": []map[string]interface{}{
 			{
@@ -807,7 +810,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// HTML Documentation
-	html := `<!DOCTYPE html>
+	html := fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -1011,7 +1014,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
     <header>
         <h1>Network Test API</h1>
         <p>API for network performance testing (bandwidth and latency)</p>
-        <span class="version">v2.0.0</span>
+        <span class="version">v%s</span>
     </header>
 
     <nav>
@@ -1279,7 +1282,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
     </div>
 
     <footer>
-        <p>Network Test API v2.0.0 - Native iperf3 Protocol Implementation</p>
+        <p>Network Test API v%s - Native iperf3 Protocol Implementation</p>
         <p style="margin-top: 15px;">
             Created by <a href="https://github.com/CoreTex" style="color: #667eea; text-decoration: none;">CoreTex</a>
         </p>
@@ -1290,7 +1293,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
         </p>
     </footer>
 </body>
-</html>`
+</html>`, API_VERSION, API_VERSION)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
