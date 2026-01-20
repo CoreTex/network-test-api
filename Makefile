@@ -81,7 +81,11 @@ docker-build: ## Build Docker image
 docker-run: ## Run Docker container
 	@docker run --rm -p $(PORT):$(PORT) network-test-api:$(VERSION)
 
-fastly-build: ## Build for Fastly
+fastly-build: ## Build for Fastly (prompts for service_id)
+	@if grep -q 'YOUR_SERVICE_ID' fastly.toml; then \
+		read -p "Enter your Fastly service_id: " SERVICE_ID; \
+		sed -i.bak "s/YOUR_SERVICE_ID/$$SERVICE_ID/" fastly.toml && rm -f fastly.toml.bak; \
+	fi
 	@echo "$(YELLOW)☁️  Building Fastly WASM...$(RESET)"
 	@fastly compute build
 	@echo "$(GREEN)✅ Fastly build complete$(RESET)"
