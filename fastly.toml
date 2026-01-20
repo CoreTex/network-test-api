@@ -1,0 +1,15 @@
+# This file describes a Fastly Compute package. To learn more visit:
+# https://www.fastly.com/documentation/reference/compute/fastly-toml
+
+authors = ["Eric Dorr"]
+description = "Pure Go Network Test API - Bandwidth + TWAMP"
+language = "go"
+manifest_version = 3
+name = "network-test-api"
+service_id = "YOUR_SERVICE_ID"
+
+[local_server]
+
+[scripts]
+  build = "go build -o bin/main.wasm ."
+  env_vars = ["GOARCH=wasm", "GOOS=wasip1"]
