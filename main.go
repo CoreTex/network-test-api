@@ -383,15 +383,25 @@ func (c *Iperf3Client) sendData(deadline time.Time) int64 {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
-	buffer := make([]byte, c.BlockSize)
+	// Calculate bandwidth per stream (in bytes per second)
+	bwPerStream := c.Bandwidth / int64(c.Parallel) / 8 // bits to bytes
+
+	// Use smaller chunk size for pacing (target ~10ms intervals)
+	// chunkSize = bandwidth_bytes_per_sec * 0.01 (10ms)
+	chunkSize := int(bwPerStream / 100)
+	if chunkSize < 1460 {
+		chunkSize = 1460 // minimum MTU-sized chunk
+	}
+	if chunkSize > c.BlockSize {
+		chunkSize = c.BlockSize
+	}
+
+	buffer := make([]byte, chunkSize)
 	rand.Read(buffer)
 
-	// Calculate bandwidth per stream (in bits per second)
-	bwPerStream := c.Bandwidth / int64(c.Parallel)
-	// Calculate time needed to send one block at target bandwidth
-	// time = (block_size_bits) / (bandwidth_bps)
-	blockBits := int64(c.BlockSize) * 8
-	intervalNs := (blockBits * int64(time.Second)) / bwPerStream
+	// Pacing interval for the chunk
+	chunkBits := int64(chunkSize) * 8
+	intervalNs := (chunkBits * int64(time.Second)) / (c.Bandwidth / int64(c.Parallel))
 
 	for _, stream := range c.streams {
 		wg.Add(1)
@@ -413,7 +423,7 @@ func (c *Iperf3Client) sendData(deadline time.Time) int64 {
 				// Pacing: wait to achieve target bandwidth
 				elapsed := time.Since(sendStart)
 				sleepTime := time.Duration(intervalNs) - elapsed
-				if sleepTime > 0 {
+				if sleepTime > 0 && sleepTime < time.Second {
 					time.Sleep(sleepTime)
 				}
 			}
