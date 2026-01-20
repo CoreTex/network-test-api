@@ -47,6 +47,7 @@ type Iperf3Client struct {
 	Protocol   string
 	Reverse    bool
 	BlockSize  int
+	Bandwidth  int64 // Bandwidth limit in bits per second
 
 	controlConn net.Conn
 	cookie      []byte
@@ -54,6 +55,8 @@ type Iperf3Client struct {
 
 	mu sync.Mutex
 }
+
+const DEFAULT_BANDWIDTH = 100 * 1000 * 1000 // 100 Mbit/s default
 
 // iperf3 Test Parameters (sent to server)
 type Iperf3Params struct {
@@ -96,13 +99,18 @@ func generateCookie() []byte {
 }
 
 // Create new iperf3 client
-func NewIperf3Client(host string, port, duration, parallel int, protocol string, reverse bool) *Iperf3Client {
+func NewIperf3Client(host string, port, duration, parallel int, protocol string, reverse bool, bandwidthMbps int) *Iperf3Client {
 	if parallel < 1 {
 		parallel = 1
 	}
 	blkSize := DEFAULT_TCP_BLKSIZE
 	if strings.ToUpper(protocol) == "UDP" {
 		blkSize = DEFAULT_UDP_BLKSIZE
+	}
+	// Convert Mbps to bps, use default if not specified
+	bandwidth := int64(bandwidthMbps) * 1000 * 1000
+	if bandwidth <= 0 {
+		bandwidth = DEFAULT_BANDWIDTH
 	}
 	return &Iperf3Client{
 		Host:      host,
@@ -112,6 +120,7 @@ func NewIperf3Client(host string, port, duration, parallel int, protocol string,
 		Protocol:  strings.ToUpper(protocol),
 		Reverse:   reverse,
 		BlockSize: blkSize,
+		Bandwidth: bandwidth,
 		cookie:    generateCookie(),
 		streams:   make([]net.Conn, 0),
 	}
@@ -374,6 +383,13 @@ func (c *Iperf3Client) sendData(deadline time.Time) int64 {
 	buffer := make([]byte, c.BlockSize)
 	rand.Read(buffer)
 
+	// Calculate bandwidth per stream (in bits per second)
+	bwPerStream := c.Bandwidth / int64(c.Parallel)
+	// Calculate time needed to send one block at target bandwidth
+	// time = (block_size_bits) / (bandwidth_bps)
+	blockBits := int64(c.BlockSize) * 8
+	intervalNs := (blockBits * int64(time.Second)) / bwPerStream
+
 	for _, stream := range c.streams {
 		wg.Add(1)
 		go func(conn net.Conn) {
@@ -383,11 +399,20 @@ func (c *Iperf3Client) sendData(deadline time.Time) int64 {
 			conn.SetWriteDeadline(deadline)
 
 			for time.Now().Before(deadline) {
+				sendStart := time.Now()
+
 				n, err := conn.Write(buffer)
 				if err != nil {
 					break
 				}
 				streamBytes += int64(n)
+
+				// Pacing: wait to achieve target bandwidth
+				elapsed := time.Since(sendStart)
+				sleepTime := time.Duration(intervalNs) - elapsed
+				if sleepTime > 0 {
+					time.Sleep(sleepTime)
+				}
 			}
 
 			mu.Lock()
@@ -445,8 +470,8 @@ func (c *Iperf3Client) Close() {
 }
 
 // Run complete iperf3 test
-func iperf3Test(host string, port, duration, parallel int, protocol string, reverse bool) (*Iperf3Result, error) {
-	client := NewIperf3Client(host, port, duration, parallel, protocol, reverse)
+func iperf3Test(host string, port, duration, parallel int, protocol string, reverse bool, bandwidthMbps int) (*Iperf3Result, error) {
+	client := NewIperf3Client(host, port, duration, parallel, protocol, reverse, bandwidthMbps)
 	defer client.Close()
 
 	if err := client.Connect(); err != nil {
@@ -473,6 +498,7 @@ type RunRequest struct {
 	Padding    int    `json:"padding"`
 	Protocol   string `json:"protocol"`
 	Reverse    bool   `json:"reverse"`
+	Bandwidth  int    `json:"bandwidth"` // Bandwidth limit in Mbit/s (default: 100)
 }
 
 type ApiResponse struct {
@@ -501,12 +527,15 @@ func iperfClientRun(w http.ResponseWriter, r *http.Request) {
 	if req.Protocol == "" {
 		req.Protocol = "TCP"
 	}
+	if req.Bandwidth == 0 {
+		req.Bandwidth = 100 // Default: 100 Mbit/s
+	}
 
-	log.Printf("iperf3 test: %s:%d (%s, %ds, %d streams, reverse=%v)",
-		req.ServerHost, req.ServerPort, req.Protocol, req.Duration, req.Parallel, req.Reverse)
+	log.Printf("iperf3 test: %s:%d (%s, %ds, %d streams, reverse=%v, bandwidth=%dM)",
+		req.ServerHost, req.ServerPort, req.Protocol, req.Duration, req.Parallel, req.Reverse, req.Bandwidth)
 
 	// Run native iperf3 test
-	result, err := iperf3Test(req.ServerHost, req.ServerPort, req.Duration, req.Parallel, req.Protocol, req.Reverse)
+	result, err := iperf3Test(req.ServerHost, req.ServerPort, req.Duration, req.Parallel, req.Protocol, req.Reverse, req.Bandwidth)
 
 	if err != nil {
 		jsonResponse(w, ApiResponse{
@@ -677,6 +706,12 @@ func getAPIDoc() map[string]interface{} {
 							"required":    "false",
 							"default":     "false",
 							"description": "Reverse mode (download instead of upload)",
+						},
+						"bandwidth": map[string]string{
+							"type":        "integer",
+							"required":    "false",
+							"default":     "100",
+							"description": "Bandwidth limit in Mbit/s",
 						},
 					},
 				},
@@ -1055,6 +1090,13 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                             <td><span class="param-default">false</span></td>
                             <td>Reverse mode (download test instead of upload)</td>
                         </tr>
+                        <tr>
+                            <td><span class="param-name">bandwidth</span></td>
+                            <td><span class="param-type">integer</span></td>
+                            <td><span class="param-optional">optional</span></td>
+                            <td><span class="param-default">100</span></td>
+                            <td>Bandwidth limit in Mbit/s</td>
+                        </tr>
                     </tbody>
                 </table>
 
@@ -1067,7 +1109,8 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
     "server_port": 5201,
     "duration": 10,
     "parallel": 4,
-    "protocol": "TCP"
+    "protocol": "TCP",
+    "bandwidth": 100
   }'</pre>
                 </div>
 
