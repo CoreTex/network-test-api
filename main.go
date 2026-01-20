@@ -2,16 +2,467 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/tcaine/twamp"
 )
+
+// iperf3 Protocol Constants
+const (
+	// Protocol States
+	TEST_START       = 1
+	TEST_RUNNING     = 2
+	TEST_END         = 4
+	PARAM_EXCHANGE   = 9
+	CREATE_STREAMS   = 10
+	EXCHANGE_RESULTS = 13
+	DISPLAY_RESULTS  = 14
+	IPERF_START      = 15
+	IPERF_DONE       = 16
+	ACCESS_DENIED    = -1
+	SERVER_ERROR     = -2
+
+	// Protocol Constants
+	COOKIE_SIZE       = 37
+	DEFAULT_TCP_BLKSIZE = 128 * 1024 // 128KB
+	DEFAULT_UDP_BLKSIZE = 1460
+)
+
+// iperf3 Client
+type Iperf3Client struct {
+	Host       string
+	Port       int
+	Duration   int
+	Parallel   int
+	Protocol   string
+	Reverse    bool
+	BlockSize  int
+
+	controlConn net.Conn
+	cookie      []byte
+	streams     []net.Conn
+
+	mu sync.Mutex
+}
+
+// iperf3 Test Parameters (sent to server)
+type Iperf3Params struct {
+	TCP          bool   `json:"tcp"`
+	UDP          bool   `json:"udp,omitempty"`
+	Omit         int    `json:"omit"`
+	Time         int    `json:"time"`
+	Num          int    `json:"num"`
+	BlockCount   int    `json:"blockcount"`
+	Parallel     int    `json:"parallel"`
+	Len          int    `json:"len"`
+	PacingTimer  int    `json:"pacing_timer"`
+	ClientVer    string `json:"client_version"`
+	Reverse      int    `json:"reverse,omitempty"`
+}
+
+// iperf3 Test Results
+type Iperf3Result struct {
+	Server        string  `json:"server"`
+	Port          int     `json:"port"`
+	Protocol      string  `json:"protocol"`
+	Duration      float64 `json:"duration_sec"`
+	SentBytes     int64   `json:"sent_bytes"`
+	ReceivedBytes int64   `json:"received_bytes,omitempty"`
+	BandwidthMbps float64 `json:"bandwidth_mbps"`
+	Retransmits   int     `json:"retransmits,omitempty"`
+}
+
+// Generate random cookie (iperf3 format: 36 chars from base32 + null terminator)
+func generateCookie() []byte {
+	const chars = "abcdefghijklmnopqrstuvwxyz234567"
+	cookie := make([]byte, COOKIE_SIZE)
+	for i := 0; i < COOKIE_SIZE-1; i++ {
+		b := make([]byte, 1)
+		rand.Read(b)
+		cookie[i] = chars[int(b[0])%len(chars)]
+	}
+	cookie[COOKIE_SIZE-1] = 0 // null terminator
+	return cookie
+}
+
+// Create new iperf3 client
+func NewIperf3Client(host string, port, duration, parallel int, protocol string, reverse bool) *Iperf3Client {
+	if parallel < 1 {
+		parallel = 1
+	}
+	blkSize := DEFAULT_TCP_BLKSIZE
+	if strings.ToUpper(protocol) == "UDP" {
+		blkSize = DEFAULT_UDP_BLKSIZE
+	}
+	return &Iperf3Client{
+		Host:      host,
+		Port:      port,
+		Duration:  duration,
+		Parallel:  parallel,
+		Protocol:  strings.ToUpper(protocol),
+		Reverse:   reverse,
+		BlockSize: blkSize,
+		cookie:    generateCookie(),
+		streams:   make([]net.Conn, 0),
+	}
+}
+
+// Read state byte from control connection
+func (c *Iperf3Client) readState() (int8, error) {
+	buf := make([]byte, 1)
+	_, err := io.ReadFull(c.controlConn, buf)
+	if err != nil {
+		return 0, err
+	}
+	return int8(buf[0]), nil
+}
+
+// Write state byte to control connection
+func (c *Iperf3Client) writeState(state int8) error {
+	_, err := c.controlConn.Write([]byte{byte(state)})
+	return err
+}
+
+// Read JSON message from control connection
+func (c *Iperf3Client) readJSON(v interface{}) error {
+	// Read 4-byte length (big endian)
+	lenBuf := make([]byte, 4)
+	_, err := io.ReadFull(c.controlConn, lenBuf)
+	if err != nil {
+		return fmt.Errorf("read length: %w", err)
+	}
+	length := binary.BigEndian.Uint32(lenBuf)
+
+	if length == 0 || length > 1024*1024 {
+		return fmt.Errorf("invalid JSON length: %d", length)
+	}
+
+	// Read JSON data
+	jsonBuf := make([]byte, length)
+	_, err = io.ReadFull(c.controlConn, jsonBuf)
+	if err != nil {
+		return fmt.Errorf("read JSON: %w", err)
+	}
+
+	return json.Unmarshal(jsonBuf, v)
+}
+
+// Write JSON message to control connection
+func (c *Iperf3Client) writeJSON(v interface{}) error {
+	jsonData, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	// Write 4-byte length (big endian)
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(jsonData)))
+
+	_, err = c.controlConn.Write(lenBuf)
+	if err != nil {
+		return err
+	}
+
+	_, err = c.controlConn.Write(jsonData)
+	return err
+}
+
+// Connect to iperf3 server
+func (c *Iperf3Client) Connect() error {
+	target := fmt.Sprintf("%s:%d", c.Host, c.Port)
+
+	conn, err := net.DialTimeout("tcp", target, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("connect to %s failed: %w", target, err)
+	}
+	c.controlConn = conn
+
+	// Set TCP_NODELAY for control connection
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+	}
+
+	// Send cookie (37 bytes including null terminator)
+	_, err = c.controlConn.Write(c.cookie)
+	if err != nil {
+		c.controlConn.Close()
+		return fmt.Errorf("send cookie failed: %w", err)
+	}
+
+	log.Printf("iperf3: Connected to %s, cookie sent (%d bytes)", target, len(c.cookie))
+	return nil
+}
+
+// Exchange parameters with server
+func (c *Iperf3Client) ExchangeParams() error {
+	// Wait for PARAM_EXCHANGE state
+	state, err := c.readState()
+	if err != nil {
+		return fmt.Errorf("read initial state: %w", err)
+	}
+
+	if state == ACCESS_DENIED {
+		return fmt.Errorf("server denied access")
+	}
+	if state == SERVER_ERROR {
+		return fmt.Errorf("server error")
+	}
+	if state != PARAM_EXCHANGE {
+		return fmt.Errorf("unexpected state %d, expected PARAM_EXCHANGE(%d)", state, PARAM_EXCHANGE)
+	}
+
+	// Send test parameters
+	params := Iperf3Params{
+		TCP:         c.Protocol == "TCP",
+		UDP:         c.Protocol == "UDP",
+		Omit:        0,
+		Time:        c.Duration,
+		Num:         0,
+		BlockCount:  0,
+		Parallel:    c.Parallel,
+		Len:         c.BlockSize,
+		PacingTimer: 1000,
+		ClientVer:   "3.16",
+	}
+	if c.Reverse {
+		params.Reverse = 1
+	}
+
+	err = c.writeJSON(params)
+	if err != nil {
+		return fmt.Errorf("send params: %w", err)
+	}
+
+	log.Printf("iperf3: Parameters exchanged (duration=%ds, parallel=%d, blksize=%d)",
+		c.Duration, c.Parallel, c.BlockSize)
+	return nil
+}
+
+// Create data streams
+func (c *Iperf3Client) CreateStreams() error {
+	// Wait for CREATE_STREAMS state
+	state, err := c.readState()
+	if err != nil {
+		return fmt.Errorf("read state: %w", err)
+	}
+	if state != CREATE_STREAMS {
+		return fmt.Errorf("unexpected state %d, expected CREATE_STREAMS(%d)", state, CREATE_STREAMS)
+	}
+
+	target := fmt.Sprintf("%s:%d", c.Host, c.Port)
+
+	for i := 0; i < c.Parallel; i++ {
+		var conn net.Conn
+		var err error
+
+		if c.Protocol == "UDP" {
+			conn, err = net.DialTimeout("udp", target, 5*time.Second)
+		} else {
+			conn, err = net.DialTimeout("tcp", target, 5*time.Second)
+		}
+		if err != nil {
+			return fmt.Errorf("create stream %d: %w", i, err)
+		}
+
+		// Send cookie to identify this stream
+		_, err = conn.Write(c.cookie)
+		if err != nil {
+			conn.Close()
+			return fmt.Errorf("send cookie on stream %d: %w", i, err)
+		}
+
+		c.streams = append(c.streams, conn)
+	}
+
+	log.Printf("iperf3: Created %d data streams", len(c.streams))
+	return nil
+}
+
+// Run the bandwidth test
+func (c *Iperf3Client) RunTest() (*Iperf3Result, error) {
+	// Wait for TEST_START
+	state, err := c.readState()
+	if err != nil {
+		return nil, fmt.Errorf("read state: %w", err)
+	}
+	if state != TEST_START {
+		return nil, fmt.Errorf("unexpected state %d, expected TEST_START(%d)", state, TEST_START)
+	}
+
+	// Wait for TEST_RUNNING
+	state, err = c.readState()
+	if err != nil {
+		return nil, fmt.Errorf("read state: %w", err)
+	}
+	if state != TEST_RUNNING {
+		return nil, fmt.Errorf("unexpected state %d, expected TEST_RUNNING(%d)", state, TEST_RUNNING)
+	}
+
+	log.Printf("iperf3: Test running for %d seconds...", c.Duration)
+
+	result := &Iperf3Result{
+		Server:   c.Host,
+		Port:     c.Port,
+		Protocol: c.Protocol,
+	}
+
+	start := time.Now()
+	deadline := start.Add(time.Duration(c.Duration) * time.Second)
+
+	if c.Reverse {
+		// Receive mode: read data from streams
+		result.ReceivedBytes = c.receiveData(deadline)
+	} else {
+		// Send mode: write data to streams
+		result.SentBytes = c.sendData(deadline)
+	}
+
+	result.Duration = time.Since(start).Seconds()
+
+	// Calculate bandwidth
+	totalBytes := result.SentBytes
+	if c.Reverse {
+		totalBytes = result.ReceivedBytes
+	}
+	result.BandwidthMbps = (float64(totalBytes) * 8) / (result.Duration * 1e6)
+
+	// Signal TEST_END
+	c.writeState(TEST_END)
+
+	// Wait for EXCHANGE_RESULTS
+	state, err = c.readState()
+	if err != nil {
+		log.Printf("iperf3: Warning - could not read EXCHANGE_RESULTS state: %v", err)
+	}
+
+	// Exchange results (simplified - just acknowledge)
+	if state == EXCHANGE_RESULTS {
+		// Send empty results
+		c.writeJSON(map[string]interface{}{})
+
+		// Read server results (ignore for now)
+		var serverResults map[string]interface{}
+		c.readJSON(&serverResults)
+	}
+
+	// Wait for DISPLAY_RESULTS
+	state, _ = c.readState()
+	if state == DISPLAY_RESULTS {
+		c.writeState(IPERF_DONE)
+	}
+
+	log.Printf("iperf3: Test completed - %.2f Mbps", result.BandwidthMbps)
+	return result, nil
+}
+
+// Send data on all streams
+func (c *Iperf3Client) sendData(deadline time.Time) int64 {
+	var totalBytes int64
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	buffer := make([]byte, c.BlockSize)
+	rand.Read(buffer)
+
+	for _, stream := range c.streams {
+		wg.Add(1)
+		go func(conn net.Conn) {
+			defer wg.Done()
+
+			var streamBytes int64
+			conn.SetWriteDeadline(deadline)
+
+			for time.Now().Before(deadline) {
+				n, err := conn.Write(buffer)
+				if err != nil {
+					break
+				}
+				streamBytes += int64(n)
+			}
+
+			mu.Lock()
+			totalBytes += streamBytes
+			mu.Unlock()
+		}(stream)
+	}
+
+	wg.Wait()
+	return totalBytes
+}
+
+// Receive data from all streams
+func (c *Iperf3Client) receiveData(deadline time.Time) int64 {
+	var totalBytes int64
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	buffer := make([]byte, c.BlockSize)
+
+	for _, stream := range c.streams {
+		wg.Add(1)
+		go func(conn net.Conn) {
+			defer wg.Done()
+
+			var streamBytes int64
+			conn.SetReadDeadline(deadline)
+
+			for time.Now().Before(deadline) {
+				n, err := conn.Read(buffer)
+				if err != nil {
+					break
+				}
+				streamBytes += int64(n)
+			}
+
+			mu.Lock()
+			totalBytes += streamBytes
+			mu.Unlock()
+		}(stream)
+	}
+
+	wg.Wait()
+	return totalBytes
+}
+
+// Close all connections
+func (c *Iperf3Client) Close() {
+	for _, stream := range c.streams {
+		stream.Close()
+	}
+	if c.controlConn != nil {
+		c.controlConn.Close()
+	}
+}
+
+// Run complete iperf3 test
+func iperf3Test(host string, port, duration, parallel int, protocol string, reverse bool) (*Iperf3Result, error) {
+	client := NewIperf3Client(host, port, duration, parallel, protocol, reverse)
+	defer client.Close()
+
+	if err := client.Connect(); err != nil {
+		return nil, err
+	}
+
+	if err := client.ExchangeParams(); err != nil {
+		return nil, err
+	}
+
+	if err := client.CreateStreams(); err != nil {
+		return nil, err
+	}
+
+	return client.RunTest()
+}
 
 type RunRequest struct {
 	ServerHost string `json:"server_host"`
@@ -21,88 +472,13 @@ type RunRequest struct {
 	Count      int    `json:"count"`
 	Padding    int    `json:"padding"`
 	Protocol   string `json:"protocol"`
+	Reverse    bool   `json:"reverse"`
 }
 
 type ApiResponse struct {
 	Status string      `json:"status"`
 	Data   interface{} `json:"data,omitempty"`
 	Error  string      `json:"error,omitempty"`
-}
-
-// Pure Go TCP Bandwidth Test
-func tcpBandwidthTest(target string, duration int) (map[string]interface{}, error) {
-	conn, err := net.DialTimeout("tcp", target, 10*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("connect failed: %w", err)
-	}
-	defer conn.Close()
-
-	// Send random data
-	buffer := make([]byte, 128*1024) // 128KB chunks
-	rand.Read(buffer)
-	
-	start := time.Now()
-	deadline := start.Add(time.Duration(duration) * time.Second)
-	conn.SetDeadline(deadline)
-	
-	var totalBytes int64
-	for time.Now().Before(deadline) {
-		n, err := conn.Write(buffer)
-		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				break
-			}
-			return nil, fmt.Errorf("write error: %w", err)
-		}
-		totalBytes += int64(n)
-	}
-	
-	elapsed := time.Since(start).Seconds()
-	mbps := (float64(totalBytes) * 8) / (elapsed * 1e6)
-	
-	return map[string]interface{}{
-		"sent_bytes":     totalBytes,
-		"duration_sec":   elapsed,
-		"bandwidth_mbps": mbps,
-	}, nil
-}
-
-// Pure Go UDP Bandwidth Test
-func udpBandwidthTest(target string, duration int) (map[string]interface{}, error) {
-	conn, err := net.DialTimeout("udp", target, 10*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("connect failed: %w", err)
-	}
-	defer conn.Close()
-
-	buffer := make([]byte, 1470) // Standard UDP packet
-	rand.Read(buffer)
-	
-	start := time.Now()
-	deadline := start.Add(time.Duration(duration) * time.Second)
-	
-	var totalBytes int64
-	var packetsSent int
-	
-	for time.Now().Before(deadline) {
-		n, err := conn.Write(buffer)
-		if err != nil {
-			break
-		}
-		totalBytes += int64(n)
-		packetsSent++
-		time.Sleep(10 * time.Microsecond)
-	}
-	
-	elapsed := time.Since(start).Seconds()
-	mbps := (float64(totalBytes) * 8) / (elapsed * 1e6)
-	
-	return map[string]interface{}{
-		"sent_bytes":     totalBytes,
-		"packets_sent":   packetsSent,
-		"duration_sec":   elapsed,
-		"bandwidth_mbps": mbps,
-	}, nil
 }
 
 func iperfClientRun(w http.ResponseWriter, r *http.Request) {
@@ -119,21 +495,18 @@ func iperfClientRun(w http.ResponseWriter, r *http.Request) {
 	if req.Duration == 0 {
 		req.Duration = 5
 	}
+	if req.Parallel == 0 {
+		req.Parallel = 1
+	}
 	if req.Protocol == "" {
 		req.Protocol = "TCP"
 	}
 
-	target := fmt.Sprintf("%s:%d", req.ServerHost, req.ServerPort)
-	log.Printf("Bandwidth test: %s (%s, %ds)", target, req.Protocol, req.Duration)
+	log.Printf("iperf3 test: %s:%d (%s, %ds, %d streams, reverse=%v)",
+		req.ServerHost, req.ServerPort, req.Protocol, req.Duration, req.Parallel, req.Reverse)
 
-	var results map[string]interface{}
-	var err error
-
-	if req.Protocol == "UDP" {
-		results, err = udpBandwidthTest(target, req.Duration)
-	} else {
-		results, err = tcpBandwidthTest(target, req.Duration)
-	}
+	// Run native iperf3 test
+	result, err := iperf3Test(req.ServerHost, req.ServerPort, req.Duration, req.Parallel, req.Protocol, req.Reverse)
 
 	if err != nil {
 		jsonResponse(w, ApiResponse{
@@ -143,18 +516,28 @@ func iperfClientRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ✅ NUR die wichtigen Daten zurückgeben
+	// Return results
+	data := map[string]interface{}{
+		"server":         result.Server,
+		"port":           result.Port,
+		"protocol":       result.Protocol,
+		"duration_sec":   result.Duration,
+		"bandwidth_mbps": result.BandwidthMbps,
+	}
+
+	if req.Reverse {
+		data["received_bytes"] = result.ReceivedBytes
+	} else {
+		data["sent_bytes"] = result.SentBytes
+	}
+
+	if result.Retransmits > 0 {
+		data["retransmits"] = result.Retransmits
+	}
+
 	jsonResponse(w, ApiResponse{
 		Status: "ok",
-		Data: map[string]interface{}{
-			"server":        req.ServerHost,
-			"port":          req.ServerPort,
-			"protocol":      req.Protocol,
-			"duration_sec":  results["duration_sec"],
-			"sent_bytes":    results["sent_bytes"],
-			"bandwidth_mbps": results["bandwidth_mbps"],
-			"packets_sent":  results["packets_sent"], // nur bei UDP
-		},
+		Data:   data,
 	}, http.StatusOK)
 }
 
@@ -250,26 +633,26 @@ func jsonResponse(w http.ResponseWriter, resp ApiResponse, status int) {
 func getAPIDoc() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "Network Test API",
-		"version":     "1.0.0",
-		"description": "API for network performance testing (bandwidth and latency)",
+		"version":     "2.0.0",
+		"description": "API for network performance testing with native iperf3 protocol support",
 		"endpoints": []map[string]interface{}{
 			{
 				"path":        "/iperf/client/run",
 				"method":      "POST",
-				"description": "Run a bandwidth test (TCP or UDP) to a target server",
+				"description": "Run an iperf3 bandwidth test (TCP or UDP) to a target iperf3 server",
 				"request": map[string]interface{}{
 					"content_type": "application/json",
 					"body": map[string]interface{}{
 						"server_host": map[string]string{
 							"type":        "string",
 							"required":    "true",
-							"description": "Target server hostname or IP",
+							"description": "iperf3 server hostname or IP",
 						},
 						"server_port": map[string]string{
 							"type":        "integer",
 							"required":    "false",
 							"default":     "5201",
-							"description": "Target server port",
+							"description": "iperf3 server port",
 						},
 						"duration": map[string]string{
 							"type":        "integer",
@@ -277,11 +660,23 @@ func getAPIDoc() map[string]interface{} {
 							"default":     "5",
 							"description": "Test duration in seconds",
 						},
+						"parallel": map[string]string{
+							"type":        "integer",
+							"required":    "false",
+							"default":     "1",
+							"description": "Number of parallel streams",
+						},
 						"protocol": map[string]string{
 							"type":        "string",
 							"required":    "false",
 							"default":     "TCP",
 							"description": "Protocol to use: TCP or UDP",
+						},
+						"reverse": map[string]string{
+							"type":        "boolean",
+							"required":    "false",
+							"default":     "false",
+							"description": "Reverse mode (download instead of upload)",
 						},
 					},
 				},
@@ -292,13 +687,13 @@ func getAPIDoc() map[string]interface{} {
 						"port":           "Target server port",
 						"protocol":       "Protocol used (TCP/UDP)",
 						"duration_sec":   "Actual test duration in seconds",
-						"sent_bytes":     "Total bytes sent",
+						"sent_bytes":     "Total bytes sent (upload mode)",
+						"received_bytes": "Total bytes received (reverse/download mode)",
 						"bandwidth_mbps": "Measured bandwidth in Mbps",
-						"packets_sent":   "Number of packets sent (UDP only)",
 					},
 				},
 				"example": map[string]interface{}{
-					"request":  `{"server_host": "iperf.example.com", "server_port": 5201, "duration": 10, "protocol": "TCP"}`,
+					"request":  `{"server_host": "iperf.example.com", "server_port": 5201, "duration": 10, "parallel": 4, "protocol": "TCP"}`,
 					"response": `{"status": "ok", "data": {"server": "iperf.example.com", "port": 5201, "protocol": "TCP", "duration_sec": 10.0, "sent_bytes": 125000000, "bandwidth_mbps": 100.0}}`,
 				},
 			},
@@ -581,12 +976,12 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
     <header>
         <h1>Network Test API</h1>
         <p>API for network performance testing (bandwidth and latency)</p>
-        <span class="version">v1.0.0</span>
+        <span class="version">v2.0.0</span>
     </header>
 
     <nav>
         <ul>
-            <li><a href="#iperf">Bandwidth Test</a></li>
+            <li><a href="#iperf">iperf3 Bandwidth Test</a></li>
             <li><a href="#twamp">TWAMP Test</a></li>
             <li><a href="#health">Health Check</a></li>
         </ul>
@@ -604,7 +999,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                 <span class="path">/iperf/client/run</span>
             </div>
             <div class="endpoint-body">
-                <p class="description">Run a bandwidth test (TCP or UDP) to a target server. Measures throughput by sending data and calculating the achieved bandwidth.</p>
+                <p class="description">Run an iperf3 bandwidth test to a target iperf3 server. Uses native iperf3 protocol implementation - compatible with any standard iperf3 server (e.g., iperf.he.net).</p>
 
                 <h3 class="section-title">Request Parameters</h3>
                 <table class="params-table">
@@ -623,14 +1018,14 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                             <td><span class="param-type">string</span></td>
                             <td><span class="param-required">required</span></td>
                             <td>-</td>
-                            <td>Target server hostname or IP</td>
+                            <td>iperf3 server hostname or IP</td>
                         </tr>
                         <tr>
                             <td><span class="param-name">server_port</span></td>
                             <td><span class="param-type">integer</span></td>
                             <td><span class="param-optional">optional</span></td>
                             <td><span class="param-default">5201</span></td>
-                            <td>Target server port</td>
+                            <td>iperf3 server port</td>
                         </tr>
                         <tr>
                             <td><span class="param-name">duration</span></td>
@@ -640,11 +1035,25 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                             <td>Test duration in seconds</td>
                         </tr>
                         <tr>
+                            <td><span class="param-name">parallel</span></td>
+                            <td><span class="param-type">integer</span></td>
+                            <td><span class="param-optional">optional</span></td>
+                            <td><span class="param-default">1</span></td>
+                            <td>Number of parallel streams</td>
+                        </tr>
+                        <tr>
                             <td><span class="param-name">protocol</span></td>
                             <td><span class="param-type">string</span></td>
                             <td><span class="param-optional">optional</span></td>
                             <td><span class="param-default">TCP</span></td>
                             <td>Protocol to use: TCP or UDP</td>
+                        </tr>
+                        <tr>
+                            <td><span class="param-name">reverse</span></td>
+                            <td><span class="param-type">boolean</span></td>
+                            <td><span class="param-optional">optional</span></td>
+                            <td><span class="param-default">false</span></td>
+                            <td>Reverse mode (download test instead of upload)</td>
                         </tr>
                     </tbody>
                 </table>
@@ -654,9 +1063,10 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                     <pre>curl -X POST https://your-api.com/iperf/client/run \
   -H "Content-Type: application/json" \
   -d '{
-    "server_host": "iperf.example.com",
+    "server_host": "iperf.he.net",
     "server_port": 5201,
     "duration": 10,
+    "parallel": 4,
     "protocol": "TCP"
   }'</pre>
                 </div>
@@ -675,9 +1085,9 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                             <tr><td><span class="param-name">port</span></td><td>Target server port</td></tr>
                             <tr><td><span class="param-name">protocol</span></td><td>Protocol used (TCP/UDP)</td></tr>
                             <tr><td><span class="param-name">duration_sec</span></td><td>Actual test duration in seconds</td></tr>
-                            <tr><td><span class="param-name">sent_bytes</span></td><td>Total bytes sent</td></tr>
+                            <tr><td><span class="param-name">sent_bytes</span></td><td>Total bytes sent (upload mode)</td></tr>
+                            <tr><td><span class="param-name">received_bytes</span></td><td>Total bytes received (reverse/download mode)</td></tr>
                             <tr><td><span class="param-name">bandwidth_mbps</span></td><td>Measured bandwidth in Mbps</td></tr>
-                            <tr><td><span class="param-name">packets_sent</span></td><td>Number of packets sent (UDP only)</td></tr>
                         </tbody>
                     </table>
 
@@ -686,12 +1096,12 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                         <pre>{
   "status": "ok",
   "data": {
-    "server": "iperf.example.com",
+    "server": "iperf.he.net",
     "port": 5201,
     "protocol": "TCP",
     "duration_sec": 10.0,
-    "sent_bytes": 125000000,
-    "bandwidth_mbps": 100.0
+    "sent_bytes": 1250000000,
+    "bandwidth_mbps": 1000.0
   }
 }</pre>
                     </div>
@@ -826,7 +1236,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
     </div>
 
     <footer>
-        <p>Network Test API v1.0.0 - Pure Go Implementation</p>
+        <p>Network Test API v2.0.0 - Native iperf3 Protocol Implementation</p>
         <p style="margin-top: 15px;">
             Created by <a href="https://github.com/CoreTex" style="color: #667eea; text-decoration: none;">CoreTex</a>
         </p>
