@@ -1,12 +1,19 @@
 # Network Test API
 
-A pure Go REST API for network performance testing, supporting bandwidth measurements (TCP/UDP) and TWAMP latency tests.
+![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)
+![Go](https://img.shields.io/badge/Go-1.21+-00ADD8.svg)
+![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)
+
+A pure Go REST API for network performance testing with **native iperf3 protocol support**, TCP/UDP bandwidth measurements, and TWAMP latency tests.
 
 ## Features
 
-- **Bandwidth Testing** - TCP and UDP throughput measurements
+- **Native iperf3 Protocol** - Compatible with standard iperf3 servers (e.g., iperf.he.net)
+- **Bandwidth Testing** - TCP and UDP throughput measurements with bandwidth limiting
+- **Parallel Streams** - Support for multiple concurrent test streams
+- **Reverse Mode** - Download tests (server sends, client receives)
 - **TWAMP Testing** - Two-Way Active Measurement Protocol for latency and packet loss
-- **Pure Go** - No external dependencies like iperf3 required
+- **Pure Go** - No external iperf3 binary required
 - **Fastly Compute Ready** - Can be deployed to Fastly's edge computing platform
 - **Interactive Documentation** - HTML documentation served at `/`
 
@@ -61,31 +68,37 @@ Response:
 ```
 
 #### `POST /iperf/client/run`
-Run a bandwidth test (TCP or UDP) to a target server.
+Run an iperf3 bandwidth test to a target iperf3 server. Uses native iperf3 protocol - compatible with any standard iperf3 server.
 
 **Request:**
 ```json
 {
-  "server_host": "iperf.example.com",
+  "server_host": "iperf.he.net",
   "server_port": 5201,
   "duration": 10,
-  "protocol": "TCP"
+  "parallel": 4,
+  "protocol": "TCP",
+  "reverse": false,
+  "bandwidth": 100
 }
 ```
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| server_host | string | Yes | - | Target server hostname or IP |
-| server_port | integer | No | 5201 | Target server port |
+| server_host | string | Yes | - | iperf3 server hostname or IP |
+| server_port | integer | No | 5201 | iperf3 server port |
 | duration | integer | No | 5 | Test duration in seconds |
+| parallel | integer | No | 1 | Number of parallel streams |
 | protocol | string | No | TCP | Protocol: TCP or UDP |
+| reverse | boolean | No | false | Reverse mode (download test) |
+| bandwidth | integer | No | 100 | Bandwidth limit in Mbit/s |
 
 **Response:**
 ```json
 {
   "status": "ok",
   "data": {
-    "server": "iperf.example.com",
+    "server": "iperf.he.net",
     "port": 5201,
     "protocol": "TCP",
     "duration_sec": 10.0,
@@ -168,6 +181,27 @@ Apache License 2.0 - See [LICENSE](LICENSE) for details.
 ## Credits
 
 Created by [CoreTex](https://github.com/CoreTex)
+
+## Changelog
+
+### v2.1.0
+- Add bandwidth limiting parameter (default: 100 Mbit/s)
+- Implement pacing for accurate bandwidth control
+- Centralize version handling
+
+### v2.0.0
+- Implement native iperf3 protocol support
+- Compatible with standard iperf3 servers (iperf.he.net, etc.)
+- Add parallel streams support
+- Add reverse mode (download tests)
+- Cookie-based authentication (37 bytes, Base32 format)
+- JSON parameter exchange with 4-byte length prefix
+
+### v1.0.0
+- Initial release
+- Basic TCP/UDP bandwidth testing
+- TWAMP latency testing
+- HTML and JSON API documentation
 
 ## Donate
 

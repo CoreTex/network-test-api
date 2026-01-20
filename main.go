@@ -810,7 +810,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// HTML Documentation
-	html := fmt.Sprintf(`<!DOCTYPE html>
+	htmlTemplate := `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -1014,7 +1014,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
     <header>
         <h1>Network Test API</h1>
         <p>API for network performance testing (bandwidth and latency)</p>
-        <span class="version">v%s</span>
+        <span class="version">v{{VERSION}}</span>
     </header>
 
     <nav>
@@ -1282,7 +1282,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
     </div>
 
     <footer>
-        <p>Network Test API v%s - Native iperf3 Protocol Implementation</p>
+        <p>Network Test API v{{VERSION}} - Native iperf3 Protocol Implementation</p>
         <p style="margin-top: 15px;">
             Created by <a href="https://github.com/CoreTex" style="color: #667eea; text-decoration: none;">CoreTex</a>
         </p>
@@ -1293,7 +1293,8 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
         </p>
     </footer>
 </body>
-</html>`, API_VERSION, API_VERSION)
+</html>`
+	html := strings.Replace(htmlTemplate, "{{VERSION}}", API_VERSION, -1)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
