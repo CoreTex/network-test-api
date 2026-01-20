@@ -383,15 +383,11 @@ func (c *Iperf3Client) sendData(deadline time.Time) int64 {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
-	// Calculate bandwidth per stream (in bytes per second)
-	bwPerStream := c.Bandwidth / int64(c.Parallel) / 8 // bits to bytes
+	// Calculate target bytes per second per stream
+	targetBytesPerSec := float64(c.Bandwidth) / float64(c.Parallel) / 8.0
 
-	// Use smaller chunk size for pacing (target ~10ms intervals)
-	// chunkSize = bandwidth_bytes_per_sec * 0.01 (10ms)
-	chunkSize := int(bwPerStream / 100)
-	if chunkSize < 1460 {
-		chunkSize = 1460 // minimum MTU-sized chunk
-	}
+	// Use reasonable chunk size (64KB for good throughput)
+	chunkSize := 64 * 1024
 	if chunkSize > c.BlockSize {
 		chunkSize = c.BlockSize
 	}
@@ -399,32 +395,34 @@ func (c *Iperf3Client) sendData(deadline time.Time) int64 {
 	buffer := make([]byte, chunkSize)
 	rand.Read(buffer)
 
-	// Pacing interval for the chunk
-	chunkBits := int64(chunkSize) * 8
-	intervalNs := (chunkBits * int64(time.Second)) / (c.Bandwidth / int64(c.Parallel))
-
 	for _, stream := range c.streams {
 		wg.Add(1)
 		go func(conn net.Conn) {
 			defer wg.Done()
 
 			var streamBytes int64
+			startTime := time.Now()
 			conn.SetWriteDeadline(deadline)
 
 			for time.Now().Before(deadline) {
-				sendStart := time.Now()
-
 				n, err := conn.Write(buffer)
 				if err != nil {
 					break
 				}
 				streamBytes += int64(n)
 
-				// Pacing: wait to achieve target bandwidth
-				elapsed := time.Since(sendStart)
-				sleepTime := time.Duration(intervalNs) - elapsed
-				if sleepTime > 0 && sleepTime < time.Second {
-					time.Sleep(sleepTime)
+				// Token bucket pacing: calculate expected bytes vs actual
+				elapsed := time.Since(startTime).Seconds()
+				expectedBytes := targetBytesPerSec * elapsed
+				actualBytes := float64(streamBytes)
+
+				// If we're ahead of schedule, sleep to catch up
+				if actualBytes > expectedBytes {
+					excessBytes := actualBytes - expectedBytes
+					sleepTime := time.Duration(excessBytes / targetBytesPerSec * float64(time.Second))
+					if sleepTime > 0 && sleepTime < 100*time.Millisecond {
+						time.Sleep(sleepTime)
+					}
 				}
 			}
 
