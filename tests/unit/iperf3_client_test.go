@@ -41,8 +41,14 @@ func NewIperf3ClientConfig(host string, port, duration, parallel int, protocol s
 	if parallel < 1 {
 		parallel = 1
 	}
+	// Default protocol to TCP
+	if protocol == "" {
+		protocol = "TCP"
+	} else {
+		protocol = strings.ToUpper(protocol)
+	}
 	blkSize := DEFAULT_TCP_BLKSIZE
-	if strings.ToUpper(protocol) == "UDP" {
+	if protocol == "UDP" {
 		blkSize = DEFAULT_UDP_BLKSIZE
 	}
 	bandwidth := int64(bandwidthMbps) * 1000 * 1000
@@ -54,7 +60,7 @@ func NewIperf3ClientConfig(host string, port, duration, parallel int, protocol s
 		Port:      port,
 		Duration:  duration,
 		Parallel:  parallel,
-		Protocol:  strings.ToUpper(protocol),
+		Protocol:  protocol,
 		Reverse:   reverse,
 		BlockSize: blkSize,
 		Bandwidth: bandwidth,
