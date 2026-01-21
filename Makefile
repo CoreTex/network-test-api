@@ -1,12 +1,12 @@
 # Network Test API Makefile
 # =========================
 
-.PHONY: help setup build run dev kill test test-bg bench clean docker-build docker-run fastly-build fastly-deploy fastly-logs check install all
+.PHONY: help setup build run dev kill test test-bg bench clean docker-build docker-run fastly-build fastly-deploy fastly-logs check install all test-unit test-integration test-functional test-e2e test-acceptance test-all test-coverage lint
 
 # Variables
 BINARY := main
 PORT := 8080
-VERSION := 1.0.0
+VERSION := 2.2.0
 
 # Colors
 GREEN  := $(shell tput -Txterm setaf 2)
@@ -101,6 +101,49 @@ fastly-logs: ## Tail Fastly logs
 install: setup ## Alias for setup
 
 all: setup test-bg ## Setup + test
+
+# Test Suite Commands
+test-unit: ## Run unit tests
+	@echo "$(YELLOW)🧪 Running unit tests...$(RESET)"
+	@go test -v -race ./tests/unit/...
+	@echo "$(GREEN)✅ Unit tests complete$(RESET)"
+
+test-integration: ## Run integration tests
+	@echo "$(YELLOW)🧪 Running integration tests...$(RESET)"
+	@go test -v -race ./tests/integration/...
+	@echo "$(GREEN)✅ Integration tests complete$(RESET)"
+
+test-functional: ## Run functional tests
+	@echo "$(YELLOW)🧪 Running functional tests...$(RESET)"
+	@go test -v -race ./tests/functional/...
+	@echo "$(GREEN)✅ Functional tests complete$(RESET)"
+
+test-e2e: ## Run E2E tests
+	@echo "$(YELLOW)🧪 Running E2E tests...$(RESET)"
+	@go test -v -race ./tests/e2e/...
+	@echo "$(GREEN)✅ E2E tests complete$(RESET)"
+
+test-acceptance: ## Run acceptance tests
+	@echo "$(YELLOW)🧪 Running acceptance tests...$(RESET)"
+	@go test -v -race ./tests/acceptance/...
+	@echo "$(GREEN)✅ Acceptance tests complete$(RESET)"
+
+test-all: ## Run all test suites
+	@echo "$(YELLOW)🧪 Running all tests...$(RESET)"
+	@go test -v -race ./tests/...
+	@echo "$(GREEN)✅ All tests complete$(RESET)"
+
+test-coverage: ## Run tests with coverage
+	@echo "$(YELLOW)🧪 Running tests with coverage...$(RESET)"
+	@go test -v -race -coverprofile=coverage.out ./tests/...
+	@go tool cover -func=coverage.out
+	@go tool cover -html=coverage.out -o coverage.html
+	@echo "$(GREEN)✅ Coverage report: coverage.html$(RESET)"
+
+lint: ## Run linter
+	@echo "$(YELLOW)🔍 Running linter...$(RESET)"
+	@golangci-lint run --timeout=5m
+	@echo "$(GREEN)✅ Lint complete$(RESET)"
 
 .DEFAULT_GOAL := help
 

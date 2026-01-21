@@ -1,29 +1,36 @@
 # Network Test API
 
-![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.2.0-blue.svg)
 ![Go](https://img.shields.io/badge/Go-1.21+-00ADD8.svg)
 ![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)
+![Tests](https://github.com/CoreTex/network-test-api/actions/workflows/test.yml/badge.svg)
 
 A pure Go REST API for network performance testing with **native iperf3 protocol support**, TCP/UDP bandwidth measurements, and TWAMP latency tests.
 
 ## Features
 
 - **Native iperf3 Protocol** - Compatible with standard iperf3 servers (e.g., iperf.he.net)
-- **Bandwidth Testing** - TCP and UDP throughput measurements with bandwidth limiting
-- **Parallel Streams** - Support for multiple concurrent test streams
+- **TWAMP Testing** - RFC 5357 compliant Two-Way Active Measurement Protocol
+- **RFC-Compliant Jitter** - IPDV (RFC 3393) and smoothed jitter (RFC 3550)
+- **Bandwidth Testing** - TCP and UDP throughput with accurate pacing
+- **Parallel Streams** - Multiple concurrent test streams
 - **Reverse Mode** - Download tests (server sends, client receives)
-- **TWAMP Testing** - Two-Way Active Measurement Protocol for latency and packet loss
-- **Pure Go** - No external iperf3 binary required
-- **Fastly Compute Ready** - Can be deployed to Fastly's edge computing platform
-- **Interactive Documentation** - HTML documentation served at `/`
+- **Hop Count** - Network hop tracking via TTL analysis
+- **NTP Sync Detection** - Automatic clock synchronization status
+- **Pure Go** - No external binaries required
+- **Docker Ready** - Easy containerized deployment
 
-## Installation
+## Documentation
 
-### Prerequisites
+| Document | Description |
+|----------|-------------|
+| [API Reference](docs/api-reference.md) | Complete API endpoint documentation |
+| [TWAMP Guide](docs/twamp.md) | TWAMP client usage and response fields |
+| [iperf3 Guide](docs/iperf3.md) | iperf3 client usage and examples |
 
-- Go 1.21 or later
+## Quick Start
 
-### Build
+### Installation
 
 ```bash
 # Clone the repository
@@ -31,69 +38,53 @@ git clone https://github.com/CoreTex/network-test-api.git
 cd network-test-api
 
 # Build
-make build
-
-# Or manually
-go mod tidy
 go build -o main .
-```
 
-## Usage
-
-### Start the Server
-
-```bash
-make run
-# or
+# Run
 ./main
 ```
 
-The server starts on port `8080` by default.
-
-### API Endpoints
-
-#### `GET /`
-Returns HTML documentation (or JSON schema with `Content-Type: application/json` header).
-
-#### `GET /health`
-Health check endpoint.
+### Docker
 
 ```bash
+# Build and run with host networking (recommended)
+docker build -t network-test-api .
+docker run -d --name network-test-api --network host network-test-api
+
+# Or with port mapping
+docker run -d -p 8080:8080 network-test-api
+```
+
+### Basic Usage
+
+```bash
+# Health check
 curl http://localhost:8080/health
+
+# iperf3 bandwidth test
+curl -X POST http://localhost:8080/iperf/client/run \
+  -H "Content-Type: application/json" \
+  -d '{"server_host": "iperf.he.net", "duration": 10}'
+
+# TWAMP latency test
+curl -X POST http://localhost:8080/twamp/client/run \
+  -H "Content-Type: application/json" \
+  -d '{"server_host": "twamp.example.com", "count": 50}'
 ```
 
-Response:
-```json
-{"status": "healthy"}
-```
+## API Endpoints
 
-#### `POST /iperf/client/run`
-Run an iperf3 bandwidth test to a target iperf3 server. Uses native iperf3 protocol - compatible with any standard iperf3 server.
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | API documentation (HTML/JSON) |
+| `/health` | GET | Health check |
+| `/iperf/client/run` | POST | Run iperf3 bandwidth test |
+| `/twamp/client/run` | POST | Run TWAMP latency test |
 
-**Request:**
-```json
-{
-  "server_host": "iperf.he.net",
-  "server_port": 5201,
-  "duration": 10,
-  "parallel": 4,
-  "protocol": "TCP",
-  "reverse": false,
-  "bandwidth": 100
-}
-```
+## Example Responses
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| server_host | string | Yes | - | iperf3 server hostname or IP |
-| server_port | integer | No | 5201 | iperf3 server port |
-| duration | integer | No | 5 | Test duration in seconds |
-| parallel | integer | No | 1 | Number of parallel streams |
-| protocol | string | No | TCP | Protocol: TCP or UDP |
-| reverse | boolean | No | false | Reverse mode (download test) |
-| bandwidth | integer | No | 100 | Bandwidth limit in Mbit/s |
+### iperf3 Test
 
-**Response:**
 ```json
 {
   "status": "ok",
@@ -108,115 +99,153 @@ Run an iperf3 bandwidth test to a target iperf3 server. Uses native iperf3 proto
 }
 ```
 
-#### `POST /twamp/client/run`
-Run a TWAMP latency test to measure RTT, one-way delays, and packet loss. Compatible with perfSONAR twampd servers.
+### TWAMP Test
 
-**Request:**
-```json
-{
-  "server_host": "twamp.example.com",
-  "server_port": 862,
-  "count": 20
-}
-```
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| server_host | string | Yes | - | TWAMP server hostname or IP |
-| server_port | integer | No | 862 | TWAMP control port |
-| count | integer | No | 10 | Number of test probes |
-
-**Response:**
 ```json
 {
   "status": "ok",
   "data": {
     "server": "twamp.example.com",
-    "local_endpoint": "192.168.1.100:19234",
-    "remote_endpoint": "203.0.113.50:18770",
-    "probes": 20,
+    "probes": 50,
     "loss_percent": 0.0,
-    "rtt_min_ms": 28.5,
-    "rtt_max_ms": 35.2,
     "rtt_avg_ms": 31.8,
-    "rtt_stddev_ms": 1.9,
-    "forward_delay_ms": {
-      "min": 14.1,
-      "max": 17.8,
-      "avg": 15.9
-    },
-    "reverse_delay_ms": {
-      "min": 14.2,
-      "max": 17.6,
-      "avg": 15.9
+    "rtt_stddev_ms": 1.2,
+    "forward_jitter_ms": 0.52,
+    "reverse_jitter_ms": 0.48,
+    "hops": {
+      "forward": {"avg": 10},
+      "reverse": {"avg": 10}
     }
   }
 }
 ```
 
-**Notes:**
-- One-way delays (forward/reverse) are calculated with automatic clock offset correction
-- Test ports are dynamically assigned from the perfSONAR range (18760-19960)
+## Development
 
-## Makefile Commands
+### Prerequisites
 
-```bash
-make help          # Show available commands
-make setup         # Clean + install deps + build
-make build         # Build binary
-make run           # Run server
-make dev           # Build + run
-make test          # Run tests (server must be running)
-make clean         # Clean build artifacts
-make fastly-build  # Build for Fastly Compute
-make fastly-deploy # Deploy to Fastly
-```
+- Go 1.21 or later
+- Docker (optional)
 
-## Deployment
-
-### Docker
+### Build & Test
 
 ```bash
-make docker-build
-make docker-run
+# Build
+make build
+
+# Run tests
+make test
+
+# Run with coverage
+make test-coverage
+
+# Lint
+make lint
 ```
 
-### Fastly Compute
+### Project Structure
+
+```
+.
+├── main.go              # Main application
+├── ntp_linux.go         # Linux NTP detection
+├── ntp_other.go         # Non-Linux NTP fallback
+├── vendor/              # Vendored dependencies
+├── docs/                # Documentation
+│   ├── api-reference.md
+│   ├── twamp.md
+│   └── iperf3.md
+├── tests/               # Test suites
+│   ├── unit/
+│   ├── integration/
+│   ├── functional/
+│   ├── e2e/
+│   └── acceptance/
+├── Dockerfile
+├── Makefile
+└── README.md
+```
+
+## Testing
+
+The project includes comprehensive test coverage:
+
+| Test Type | Description | Location |
+|-----------|-------------|----------|
+| Unit Tests | Test individual functions | `tests/unit/` |
+| Integration Tests | Test component interactions | `tests/integration/` |
+| Functional Tests | Test API endpoints | `tests/functional/` |
+| E2E Tests | Test complete workflows | `tests/e2e/` |
+| Acceptance Tests | Test user scenarios | `tests/acceptance/` |
+
+Run all tests:
 
 ```bash
-make fastly-deploy
+make test-all
 ```
+
+## CI/CD
+
+GitHub Actions automatically runs:
+- Unit tests on every push
+- Integration tests on pull requests
+- Full test suite on releases
+
+## Compatibility
+
+### iperf3 Servers
+- iperf3 v3.x servers
+- Public servers: iperf.he.net, speedtest.wtnet.de
+- perfSONAR pscheduler
+
+### TWAMP Servers
+- perfSONAR twampd (v5.x)
+- Juniper TWAMP reflector
+- Cisco IP SLA TWAMP responder
+- RFC 5357 compliant servers
 
 ## License
 
 Apache License 2.0 - See [LICENSE](LICENSE) for details.
 
-## Credits
+## Contributing
 
-Created by [CoreTex](https://github.com/CoreTex)
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run tests: `make test-all`
+5. Submit a pull request
 
 ## Changelog
 
+### v2.2.0
+- Add RFC 3393 IPDV (IP Packet Delay Variation)
+- Add RFC 3550 exponentially smoothed jitter
+- Fix RTT calculation to exclude reflector turnaround
+- Add hop count tracking from TTL values
+- Add NTP sync detection via adjtimex (Linux)
+- Add comprehensive test suite
+- Add detailed documentation
+
 ### v2.1.0
 - Add bandwidth limiting parameter (default: 100 Mbit/s)
-- Implement pacing for accurate bandwidth control
-- Centralize version handling
+- Implement token bucket pacing for accurate bandwidth control
 
 ### v2.0.0
 - Implement native iperf3 protocol support
-- Compatible with standard iperf3 servers (iperf.he.net, etc.)
-- Add parallel streams support
-- Add reverse mode (download tests)
-- Cookie-based authentication (37 bytes, Base32 format)
-- JSON parameter exchange with 4-byte length prefix
+- Add parallel streams and reverse mode
+- Cookie-based authentication
 
 ### v1.0.0
 - Initial release
 - Basic TCP/UDP bandwidth testing
 - TWAMP latency testing
-- HTML and JSON API documentation
 
-## Donate
+## Credits
+
+Created by [CoreTex](https://github.com/CoreTex)
+
+## Support
 
 If you find this project useful, consider buying me a coffee:
 
