@@ -109,24 +109,22 @@ Run an iperf3 bandwidth test to a target iperf3 server. Uses native iperf3 proto
 ```
 
 #### `POST /twamp/client/run`
-Run a TWAMP latency test to measure RTT and packet loss.
+Run a TWAMP latency test to measure RTT, one-way delays, and packet loss. Compatible with perfSONAR twampd servers.
 
 **Request:**
 ```json
 {
   "server_host": "twamp.example.com",
   "server_port": 862,
-  "count": 20,
-  "padding": 42
+  "count": 20
 }
 ```
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | server_host | string | Yes | - | TWAMP server hostname or IP |
-| server_port | integer | No | 862 | TWAMP server port |
+| server_port | integer | No | 862 | TWAMP control port |
 | count | integer | No | 10 | Number of test probes |
-| padding | integer | No | 42 | Padding bytes in packets |
 
 **Response:**
 ```json
@@ -134,16 +132,31 @@ Run a TWAMP latency test to measure RTT and packet loss.
   "status": "ok",
   "data": {
     "server": "twamp.example.com",
-    "port": 862,
+    "local_endpoint": "192.168.1.100:19234",
+    "remote_endpoint": "203.0.113.50:18770",
     "probes": 20,
     "loss_percent": 0.0,
-    "rtt_min_ms": 1.2,
-    "rtt_max_ms": 5.8,
-    "rtt_avg_ms": 2.5,
-    "rtt_stddev_ms": 0.9
+    "rtt_min_ms": 28.5,
+    "rtt_max_ms": 35.2,
+    "rtt_avg_ms": 31.8,
+    "rtt_stddev_ms": 1.9,
+    "forward_delay_ms": {
+      "min": 14.1,
+      "max": 17.8,
+      "avg": 15.9
+    },
+    "reverse_delay_ms": {
+      "min": 14.2,
+      "max": 17.6,
+      "avg": 15.9
+    }
   }
 }
 ```
+
+**Notes:**
+- One-way delays (forward/reverse) are calculated with automatic clock offset correction
+- Test ports are dynamically assigned from the perfSONAR range (18760-19960)
 
 ## Makefile Commands
 

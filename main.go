@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
+	mathrand "math/rand"
 	"net"
 	"net/http"
 	"strings"
@@ -17,8 +19,48 @@ import (
 	"github.com/tcaine/twamp"
 )
 
+// TWAMP test port range (perfSONAR default)
+const (
+	twampPortMin = 18762 // Leave 18760-18761 for receiver
+	twampPortMax = 19960
+)
+
+// ErrorEstimateInfo contains parsed Error Estimate field information (RFC 4656/5357)
+type ErrorEstimateInfo struct {
+	Synced       bool    // S-bit: clock is synchronized to UTC
+	Unavailable  bool    // Z-bit: timestamp not available (error is infinite)
+	Scale        uint8   // 6-bit scale factor
+	Multiplier   uint8   // 8-bit multiplier
+	ErrorSeconds float64 // Calculated error: Multiplier × 2^(-Scale)
+}
+
+// parseErrorEstimate extracts S, Z, Scale, and Multiplier from the 16-bit Error Estimate field
+// Format (RFC 4656 Section 4.1.2):
+//   Bit 15: S (Synchronized) - 1 if clock is synced to UTC via external source
+//   Bit 14: Z (Zero) - 1 if timestamp is not available
+//   Bits 8-13: Scale (6-bit unsigned)
+//   Bits 0-7: Multiplier (8-bit unsigned)
+// Error in seconds = Multiplier × 2^(-Scale)
+func parseErrorEstimate(ee uint16) ErrorEstimateInfo {
+	info := ErrorEstimateInfo{
+		Synced:      (ee>>15)&1 == 1,
+		Unavailable: (ee>>14)&1 == 1,
+		Scale:       uint8((ee >> 8) & 0x3F), // bits 8-13 (6 bits)
+		Multiplier:  uint8(ee & 0xFF),        // bits 0-7 (8 bits)
+	}
+
+	if info.Unavailable || info.Multiplier == 0 {
+		info.ErrorSeconds = -1 // Infinite/unavailable
+	} else {
+		// Error = Multiplier × 2^(-Scale)
+		info.ErrorSeconds = float64(info.Multiplier) * math.Pow(2, -float64(info.Scale))
+	}
+
+	return info
+}
+
 // API Version
-const API_VERSION = "2.1.0"
+const API_VERSION = "2.2.0"
 
 // iperf3 Protocol Constants
 const (
@@ -595,9 +637,7 @@ func twampClientRun(w http.ResponseWriter, r *http.Request) {
 	if req.Count == 0 {
 		req.Count = 10
 	}
-	if req.Padding == 0 {
-		req.Padding = 42
-	}
+	// Note: padding defaults to 0, which matches server's 41-byte response
 
 	target := fmt.Sprintf("%s:%d", req.ServerHost, req.ServerPort)
 	log.Printf("TWAMP test: %s (%d probes)", target, req.Count)
@@ -613,12 +653,17 @@ func twampClientRun(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	// Use random port in perfSONAR's allowed range to avoid conflicts
+	senderPort := twampPortMin + mathrand.Intn(twampPortMax-twampPortMin)
+	// Calculate Error Estimate based on actual NTP sync status and clock precision
+	errorEstimate := calculateErrorEstimate()
 	sessionConfig := twamp.TwampSessionConfig{
-		ReceiverPort: 6666,
-		SenderPort:   6666,
-		Timeout:      5,
-		Padding:      req.Padding,
-		TOS:          twamp.EF,
+		ReceiverPort:  18760,         // Use port in perfSONAR's allowed range
+		SenderPort:    senderPort,    // Random port in allowed range
+		Timeout:       5,
+		Padding:       req.Padding,
+		TOS:           0,             // Best Effort (default) - EF not supported by all servers
+		ErrorEstimate: errorEstimate, // Calculated from adjtimex (NTP sync + esterror)
 	}
 	session, err := conn.CreateSession(sessionConfig)
 	if err != nil {
@@ -639,6 +684,11 @@ func twampClientRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Capture test port information
+	localAddr := test.GetConnection().LocalAddr().String()
+	remoteAddr := test.GetConnection().RemoteAddr().String()
+	log.Printf("TWAMP test created, remote: %s, local: %s", remoteAddr, localAddr)
+
 	results, err := test.RunMultiple(uint64(req.Count), nil, time.Second, nil)
 	if err != nil {
 		jsonResponse(w, ApiResponse{
@@ -649,17 +699,379 @@ func twampClientRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stat := results.Stat
+
+	// Calculate raw forward and reverse delays (affected by clock offset)
+	// Raw forward = T2 - T1 = actual_forward + clock_offset
+	// Raw reverse = T4 - T3 = actual_reverse - clock_offset
+	// Per-packet offset = (raw_forward - raw_reverse) / 2
+	// Per-packet corrected: forward = raw_forward - offset, reverse = raw_reverse + offset
+
+	var fwdMin, fwdMax, fwdTotal time.Duration
+	var revMin, revMax, revTotal time.Duration
+	var fwdCorrMin, fwdCorrMax, fwdCorrTotal time.Duration
+	var revCorrMin, revCorrMax, revCorrTotal time.Duration
+	var offsetTotal time.Duration
+	var turnaroundMin, turnaroundMax, turnaroundTotal time.Duration // Reflector processing time (T3-T2)
+	var networkRttMin, networkRttMax, networkRttTotal time.Duration // Corrected RTT without turnaround
+	var networkRttSquaredTotal float64                              // For stddev calculation
+	validCount := 0
+
+	// RFC 3393 IPDV (IP Packet Delay Variation) tracking
+	// IPDV(i) = D(i) - D(i-1) where D is one-way delay
+	// Clock offset cancels out: IPDV_fwd = (T2[i]-T1[i]) - (T2[i-1]-T1[i-1])
+	var prevRawFwd, prevRawRev time.Duration
+	var fwdIPDVMin, fwdIPDVMax, fwdIPDVTotal time.Duration
+	var revIPDVMin, revIPDVMax, revIPDVTotal time.Duration
+	var fwdIPDVAbsTotal, revIPDVAbsTotal time.Duration // For mean absolute IPDV
+	var ipdvCount int
+
+	// RFC 3550 Jitter (exponentially weighted mean absolute deviation)
+	// J(i) = J(i-1) + (|D(i-1,i)| - J(i-1)) / 16
+	var fwdJitterRFC3550, revJitterRFC3550 float64
+
+	// Hop count tracking (from TTL values)
+	// Forward hops: 255 - SenderTTL (sender sends with TTL=255, reflector reports what it received)
+	// Reverse hops: InitialTTL - ReceivedTTL (need to estimate InitialTTL from received value)
+	var fwdHopsMin, fwdHopsMax, fwdHopsTotal int
+	var revHopsMin, revHopsMax, revHopsTotal int
+	var hopsCount int
+
+	// Check local clock synchronization via adjtimex syscall
+	senderSynced := checkNTPSync()
+
+	// Parse Error Estimate fields from both sender and reflector
+	var senderErrorInfo, reflectorErrorInfo ErrorEstimateInfo
+	var senderErrorRaw, reflectorErrorRaw uint16
+	reflectorSynced := false
+
+	for _, r := range results.Results {
+		if r.FinishedTimestamp.IsZero() {
+			continue // Skip lost packets
+		}
+		rawFwd := r.ReceiveTimestamp.Sub(r.SenderTimestamp)
+		rawRev := r.FinishedTimestamp.Sub(r.Timestamp)
+		// Reflector turnaround time (T3 - T2) - processing time at reflector
+		turnaround := r.Timestamp.Sub(r.ReceiveTimestamp)
+
+		// Per-packet offset correction (removes clock drift from jitter)
+		offset := (rawFwd - rawRev) / 2
+		fwdCorr := rawFwd - offset // = (rawFwd + rawRev) / 2 = RTT / 2
+		revCorr := rawRev + offset // = (rawFwd + rawRev) / 2 = RTT / 2
+
+		// Network RTT = rawFwd + rawRev = (T2-T1) + (T4-T3) = (T4-T1) - (T3-T2)
+		// This is the true network round-trip time without reflector processing delay
+		networkRtt := rawFwd + rawRev
+
+		// Parse full Error Estimate fields (only need to do this once, values should be consistent)
+		if validCount == 0 {
+			senderErrorRaw = r.SenderErrorEstimate
+			reflectorErrorRaw = r.ErrorEstimate
+			senderErrorInfo = parseErrorEstimate(senderErrorRaw)
+			reflectorErrorInfo = parseErrorEstimate(reflectorErrorRaw)
+			reflectorSynced = reflectorErrorInfo.Synced
+
+			log.Printf("TWAMP Error Estimates - Sender: 0x%04X (S=%v, Z=%v, Scale=%d, Mult=%d, Err=%.9fs), Reflector: 0x%04X (S=%v, Z=%v, Scale=%d, Mult=%d, Err=%.9fs)",
+				senderErrorRaw, senderErrorInfo.Synced, senderErrorInfo.Unavailable, senderErrorInfo.Scale, senderErrorInfo.Multiplier, senderErrorInfo.ErrorSeconds,
+				reflectorErrorRaw, reflectorErrorInfo.Synced, reflectorErrorInfo.Unavailable, reflectorErrorInfo.Scale, reflectorErrorInfo.Multiplier, reflectorErrorInfo.ErrorSeconds)
+		}
+
+		// Calculate hop counts from TTL values
+		// Forward: Sender sends with TTL=255, SenderTTL is what reflector received
+		if r.SenderTTL > 0 && r.SenderTTL <= 255 {
+			fwdHops := 255 - int(r.SenderTTL)
+			if hopsCount == 0 {
+				fwdHopsMin, fwdHopsMax = fwdHops, fwdHops
+			} else {
+				if fwdHops < fwdHopsMin {
+					fwdHopsMin = fwdHops
+				}
+				if fwdHops > fwdHopsMax {
+					fwdHopsMax = fwdHops
+				}
+			}
+			fwdHopsTotal += fwdHops
+		}
+
+		// Reverse: Estimate initial TTL from received value
+		// Common initial TTLs: 64 (Linux), 128 (Windows), 255 (Cisco/Network devices)
+		if r.ReceivedTTL > 0 {
+			var initialTTL int
+			if r.ReceivedTTL > 128 {
+				initialTTL = 255
+			} else if r.ReceivedTTL > 64 {
+				initialTTL = 128
+			} else {
+				initialTTL = 64
+			}
+			revHops := initialTTL - r.ReceivedTTL
+			if hopsCount == 0 {
+				revHopsMin, revHopsMax = revHops, revHops
+			} else {
+				if revHops < revHopsMin {
+					revHopsMin = revHops
+				}
+				if revHops > revHopsMax {
+					revHopsMax = revHops
+				}
+			}
+			revHopsTotal += revHops
+		}
+		hopsCount++
+
+		// Calculate IPDV for consecutive packets (RFC 3393)
+		// This cancels out clock offset!
+		if validCount > 0 {
+			fwdIPDV := rawFwd - prevRawFwd // (T2[i]-T1[i]) - (T2[i-1]-T1[i-1])
+			revIPDV := rawRev - prevRawRev // (T4[i]-T3[i]) - (T4[i-1]-T3[i-1])
+
+			// Track IPDV statistics
+			if ipdvCount == 0 {
+				fwdIPDVMin, fwdIPDVMax = fwdIPDV, fwdIPDV
+				revIPDVMin, revIPDVMax = revIPDV, revIPDV
+			} else {
+				if fwdIPDV < fwdIPDVMin {
+					fwdIPDVMin = fwdIPDV
+				}
+				if fwdIPDV > fwdIPDVMax {
+					fwdIPDVMax = fwdIPDV
+				}
+				if revIPDV < revIPDVMin {
+					revIPDVMin = revIPDV
+				}
+				if revIPDV > revIPDVMax {
+					revIPDVMax = revIPDV
+				}
+			}
+			fwdIPDVTotal += fwdIPDV
+			revIPDVTotal += revIPDV
+
+			// Absolute IPDV for mean absolute deviation
+			if fwdIPDV < 0 {
+				fwdIPDVAbsTotal += -fwdIPDV
+			} else {
+				fwdIPDVAbsTotal += fwdIPDV
+			}
+			if revIPDV < 0 {
+				revIPDVAbsTotal += -revIPDV
+			} else {
+				revIPDVAbsTotal += revIPDV
+			}
+
+			// RFC 3550 exponential smoothing: J = J + (|D| - J) / 16
+			fwdIPDVAbsNs := math.Abs(float64(fwdIPDV.Nanoseconds()))
+			revIPDVAbsNs := math.Abs(float64(revIPDV.Nanoseconds()))
+			fwdJitterRFC3550 = fwdJitterRFC3550 + (fwdIPDVAbsNs-fwdJitterRFC3550)/16.0
+			revJitterRFC3550 = revJitterRFC3550 + (revIPDVAbsNs-revJitterRFC3550)/16.0
+
+			ipdvCount++
+		}
+
+		// Store for next iteration
+		prevRawFwd = rawFwd
+		prevRawRev = rawRev
+
+		if validCount == 0 {
+			fwdMin, fwdMax = rawFwd, rawFwd
+			revMin, revMax = rawRev, rawRev
+			fwdCorrMin, fwdCorrMax = fwdCorr, fwdCorr
+			revCorrMin, revCorrMax = revCorr, revCorr
+			turnaroundMin, turnaroundMax = turnaround, turnaround
+			networkRttMin, networkRttMax = networkRtt, networkRtt
+		} else {
+			if rawFwd < fwdMin {
+				fwdMin = rawFwd
+			}
+			if rawFwd > fwdMax {
+				fwdMax = rawFwd
+			}
+			if rawRev < revMin {
+				revMin = rawRev
+			}
+			if rawRev > revMax {
+				revMax = rawRev
+			}
+			if fwdCorr < fwdCorrMin {
+				fwdCorrMin = fwdCorr
+			}
+			if fwdCorr > fwdCorrMax {
+				fwdCorrMax = fwdCorr
+			}
+			if revCorr < revCorrMin {
+				revCorrMin = revCorr
+			}
+			if revCorr > revCorrMax {
+				revCorrMax = revCorr
+			}
+			if turnaround < turnaroundMin {
+				turnaroundMin = turnaround
+			}
+			if turnaround > turnaroundMax {
+				turnaroundMax = turnaround
+			}
+			if networkRtt < networkRttMin {
+				networkRttMin = networkRtt
+			}
+			if networkRtt > networkRttMax {
+				networkRttMax = networkRtt
+			}
+		}
+		fwdTotal += rawFwd
+		revTotal += rawRev
+		turnaroundTotal += turnaround
+		fwdCorrTotal += fwdCorr
+		revCorrTotal += revCorr
+		offsetTotal += offset
+		networkRttTotal += networkRtt
+		networkRttSquaredTotal += float64(networkRtt.Nanoseconds()) * float64(networkRtt.Nanoseconds())
+		validCount++
+	}
+
+	var fwdAvg, revAvg, offsetAvg time.Duration
+	var fwdCorrAvg, revCorrAvg time.Duration
+	var turnaroundAvg time.Duration
+	var networkRttAvg time.Duration
+	var networkRttStdDev time.Duration
+	var fwdIPDVAvg, revIPDVAvg time.Duration             // Mean IPDV (can be negative)
+	var fwdIPDVAbsAvg, revIPDVAbsAvg time.Duration       // Mean Absolute IPDV
+	if validCount > 0 {
+		fwdAvg = fwdTotal / time.Duration(validCount)
+		revAvg = revTotal / time.Duration(validCount)
+		fwdCorrAvg = fwdCorrTotal / time.Duration(validCount)
+		revCorrAvg = revCorrTotal / time.Duration(validCount)
+		offsetAvg = offsetTotal / time.Duration(validCount)
+		turnaroundAvg = turnaroundTotal / time.Duration(validCount)
+		networkRttAvg = networkRttTotal / time.Duration(validCount)
+
+		// Calculate stddev for network RTT: sqrt(E[X²] - E[X]²)
+		meanNs := float64(networkRttAvg.Nanoseconds())
+		meanSquaredNs := networkRttSquaredTotal / float64(validCount)
+		varianceNs := meanSquaredNs - (meanNs * meanNs)
+		if varianceNs > 0 {
+			networkRttStdDev = time.Duration(math.Sqrt(varianceNs))
+		}
+	}
+
+	// Calculate IPDV averages
+	if ipdvCount > 0 {
+		fwdIPDVAvg = fwdIPDVTotal / time.Duration(ipdvCount)
+		revIPDVAvg = revIPDVTotal / time.Duration(ipdvCount)
+		fwdIPDVAbsAvg = fwdIPDVAbsTotal / time.Duration(ipdvCount)
+		revIPDVAbsAvg = revIPDVAbsTotal / time.Duration(ipdvCount)
+	}
+
+	// Calculate hop averages
+	var fwdHopsAvg, revHopsAvg float64
+	if hopsCount > 0 {
+		fwdHopsAvg = float64(fwdHopsTotal) / float64(hopsCount)
+		revHopsAvg = float64(revHopsTotal) / float64(hopsCount)
+	}
+
+	// Determine sync status
+	bothSynced := senderSynced && reflectorSynced
+
 	jsonResponse(w, ApiResponse{
 		Status: "ok",
 		Data: map[string]interface{}{
-			"server":        req.ServerHost,
-			"port":          req.ServerPort,
-			"probes":        req.Count,
-			"loss_percent":  stat.Loss,
-			"rtt_min_ms":    float64(stat.Min.Nanoseconds()) / 1e6,
-			"rtt_max_ms":    float64(stat.Max.Nanoseconds()) / 1e6,
-			"rtt_avg_ms":    float64(stat.Avg.Nanoseconds()) / 1e6,
-			"rtt_stddev_ms": float64(stat.StdDev.Nanoseconds()) / 1e6,
+			"server":                    req.ServerHost,
+			"local_endpoint":            localAddr,
+			"remote_endpoint":           remoteAddr,
+			"probes":                    req.Count,
+			"loss_percent":              stat.Loss,
+			// Corrected network RTT: (T4-T1) - (T3-T2) = pure network delay without reflector processing
+			"rtt_min_ms":                float64(networkRttMin.Nanoseconds()) / 1e6,
+			"rtt_max_ms":                float64(networkRttMax.Nanoseconds()) / 1e6,
+			"rtt_avg_ms":                float64(networkRttAvg.Nanoseconds()) / 1e6,
+			"rtt_stddev_ms":             float64(networkRttStdDev.Nanoseconds()) / 1e6,
+			// Raw RTT from library for reference: T4-T1 (includes reflector processing time)
+			"rtt_raw_ms": map[string]float64{
+				"min":    float64(stat.Min.Nanoseconds()) / 1e6,
+				"max":    float64(stat.Max.Nanoseconds()) / 1e6,
+				"avg":    float64(stat.Avg.Nanoseconds()) / 1e6,
+				"stddev": float64(stat.StdDev.Nanoseconds()) / 1e6,
+			},
+			"reflector_turnaround_ms": map[string]float64{
+				"min": float64(turnaroundMin.Nanoseconds()) / 1e6,
+				"max": float64(turnaroundMax.Nanoseconds()) / 1e6,
+				"avg": float64(turnaroundAvg.Nanoseconds()) / 1e6,
+			},
+			"estimated_clock_offset_ms": float64(offsetAvg.Nanoseconds()) / 1e6,
+			"sync_status": map[string]interface{}{
+				"sender_synced":    senderSynced,
+				"reflector_synced": reflectorSynced,
+				"both_synced":      bothSynced,
+				"sender_error_estimate": map[string]interface{}{
+					"synced":           senderErrorInfo.Synced,
+					"unavailable":      senderErrorInfo.Unavailable,
+					"scale":            senderErrorInfo.Scale,
+					"multiplier":       senderErrorInfo.Multiplier,
+					"error_seconds":    senderErrorInfo.ErrorSeconds,
+					"error_ms":         senderErrorInfo.ErrorSeconds * 1000,
+					"raw_value_hex":    fmt.Sprintf("0x%04X", senderErrorRaw),
+				},
+				"reflector_error_estimate": map[string]interface{}{
+					"synced":           reflectorErrorInfo.Synced,
+					"unavailable":      reflectorErrorInfo.Unavailable,
+					"scale":            reflectorErrorInfo.Scale,
+					"multiplier":       reflectorErrorInfo.Multiplier,
+					"error_seconds":    reflectorErrorInfo.ErrorSeconds,
+					"error_ms":         reflectorErrorInfo.ErrorSeconds * 1000,
+					"raw_value_hex":    fmt.Sprintf("0x%04X", reflectorErrorRaw),
+				},
+			},
+			"forward_delay_raw_ms": map[string]float64{
+				"min": float64(fwdMin.Nanoseconds()) / 1e6,
+				"max": float64(fwdMax.Nanoseconds()) / 1e6,
+				"avg": float64(fwdAvg.Nanoseconds()) / 1e6,
+			},
+			"forward_delay_corrected_ms": map[string]float64{
+				"min": float64(fwdCorrMin.Nanoseconds()) / 1e6,
+				"max": float64(fwdCorrMax.Nanoseconds()) / 1e6,
+				"avg": float64(fwdCorrAvg.Nanoseconds()) / 1e6,
+			},
+			// RFC 3393 IPDV (IP Packet Delay Variation) - difference between consecutive packet delays
+			// Clock offset cancels out, so this is true one-way delay variation
+			"forward_ipdv_ms": map[string]float64{
+				"min":      float64(fwdIPDVMin.Nanoseconds()) / 1e6,
+				"max":      float64(fwdIPDVMax.Nanoseconds()) / 1e6,
+				"avg":      float64(fwdIPDVAvg.Nanoseconds()) / 1e6,
+				"mean_abs": float64(fwdIPDVAbsAvg.Nanoseconds()) / 1e6, // Mean Absolute Deviation
+			},
+			// RFC 3550 Jitter - exponentially smoothed mean absolute IPDV
+			"forward_jitter_ms": fwdJitterRFC3550 / 1e6,
+			"reverse_delay_raw_ms": map[string]float64{
+				"min": float64(revMin.Nanoseconds()) / 1e6,
+				"max": float64(revMax.Nanoseconds()) / 1e6,
+				"avg": float64(revAvg.Nanoseconds()) / 1e6,
+			},
+			"reverse_delay_corrected_ms": map[string]float64{
+				"min": float64(revCorrMin.Nanoseconds()) / 1e6,
+				"max": float64(revCorrMax.Nanoseconds()) / 1e6,
+				"avg": float64(revCorrAvg.Nanoseconds()) / 1e6,
+			},
+			// RFC 3393 IPDV for reverse direction
+			"reverse_ipdv_ms": map[string]float64{
+				"min":      float64(revIPDVMin.Nanoseconds()) / 1e6,
+				"max":      float64(revIPDVMax.Nanoseconds()) / 1e6,
+				"avg":      float64(revIPDVAvg.Nanoseconds()) / 1e6,
+				"mean_abs": float64(revIPDVAbsAvg.Nanoseconds()) / 1e6,
+			},
+			// RFC 3550 Jitter for reverse direction
+			"reverse_jitter_ms": revJitterRFC3550 / 1e6,
+			// Hop counts derived from TTL values
+			// Forward: 255 - SenderTTL (sender uses TTL=255)
+			// Reverse: EstimatedInitialTTL - ReceivedTTL (initial TTL estimated from received value)
+			"hops": map[string]interface{}{
+				"forward": map[string]interface{}{
+					"min": fwdHopsMin,
+					"max": fwdHopsMax,
+					"avg": fwdHopsAvg,
+				},
+				"reverse": map[string]interface{}{
+					"min": revHopsMin,
+					"max": revHopsMax,
+					"avg": revHopsAvg,
+				},
+			},
 		},
 	}, http.StatusOK)
 }
@@ -746,7 +1158,7 @@ func getAPIDoc() map[string]interface{} {
 			{
 				"path":        "/twamp/client/run",
 				"method":      "POST",
-				"description": "Run a TWAMP latency test to measure RTT and packet loss",
+				"description": "Run a TWAMP latency test to measure RTT, one-way delays, jitter, and packet loss. Compatible with perfSONAR twampd.",
 				"request": map[string]interface{}{
 					"content_type": "application/json",
 					"body": map[string]interface{}{
@@ -759,7 +1171,7 @@ func getAPIDoc() map[string]interface{} {
 							"type":        "integer",
 							"required":    "false",
 							"default":     "862",
-							"description": "TWAMP server port",
+							"description": "TWAMP control port",
 						},
 						"count": map[string]string{
 							"type":        "integer",
@@ -767,30 +1179,33 @@ func getAPIDoc() map[string]interface{} {
 							"default":     "10",
 							"description": "Number of test probes to send",
 						},
-						"padding": map[string]string{
-							"type":        "integer",
-							"required":    "false",
-							"default":     "42",
-							"description": "Padding bytes in test packets",
-						},
 					},
 				},
 				"response": map[string]interface{}{
 					"content_type": "application/json",
 					"body": map[string]string{
-						"server":        "Target server hostname",
-						"port":          "Target server port",
-						"probes":        "Number of probes sent",
-						"loss_percent":  "Packet loss percentage",
-						"rtt_min_ms":    "Minimum RTT in milliseconds",
-						"rtt_max_ms":    "Maximum RTT in milliseconds",
-						"rtt_avg_ms":    "Average RTT in milliseconds",
-						"rtt_stddev_ms": "RTT standard deviation in milliseconds",
+						"server":                      "Target server hostname",
+						"local_endpoint":              "Local test endpoint (IP:port)",
+						"remote_endpoint":             "Remote test endpoint (IP:port)",
+						"probes":                      "Number of probes sent",
+						"loss_percent":                "Packet loss percentage",
+						"rtt_min_ms":                  "Minimum RTT in milliseconds",
+						"rtt_max_ms":                  "Maximum RTT in milliseconds",
+						"rtt_avg_ms":                  "Average RTT in milliseconds",
+						"rtt_stddev_ms":               "RTT standard deviation in milliseconds",
+						"estimated_clock_offset_ms":   "Estimated clock offset between sender and reflector",
+						"sync_status":                 "Clock sync status (sender_synced, reflector_synced, both_synced)",
+						"forward_delay_raw_ms":        "Raw forward delay (min, max, avg)",
+						"forward_delay_corrected_ms":  "Corrected forward delay (min, max, avg)",
+						"forward_jitter_ms":           "Forward path jitter (max - min)",
+						"reverse_delay_raw_ms":        "Raw reverse delay (min, max, avg)",
+						"reverse_delay_corrected_ms":  "Corrected reverse delay (min, max, avg)",
+						"reverse_jitter_ms":           "Reverse path jitter (max - min)",
 					},
 				},
 				"example": map[string]interface{}{
 					"request":  `{"server_host": "twamp.example.com", "server_port": 862, "count": 20}`,
-					"response": `{"status": "ok", "data": {"server": "twamp.example.com", "port": 862, "probes": 20, "loss_percent": 0.0, "rtt_min_ms": 1.2, "rtt_max_ms": 5.8, "rtt_avg_ms": 2.5, "rtt_stddev_ms": 0.9}}`,
+					"response": `{"status": "ok", "data": {"server": "twamp.example.com", "local_endpoint": "192.168.1.100:19234", "remote_endpoint": "203.0.113.50:18760", "probes": 20, "loss_percent": 0.0, "rtt_avg_ms": 31.8, "sync_status": {"both_synced": true}, "forward_jitter_ms": 3.7, "reverse_jitter_ms": 3.4}}`,
 				},
 			},
 			{
@@ -1169,7 +1584,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                 <span class="path">/twamp/client/run</span>
             </div>
             <div class="endpoint-body">
-                <p class="description">Run a TWAMP (Two-Way Active Measurement Protocol) latency test to measure round-trip time and packet loss with high precision.</p>
+                <p class="description">Run a TWAMP (Two-Way Active Measurement Protocol) latency test to measure round-trip time, one-way delays, jitter, and packet loss. Compatible with perfSONAR twampd servers.</p>
 
                 <h3 class="section-title">Request Parameters</h3>
                 <table class="params-table">
@@ -1195,7 +1610,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                             <td><span class="param-type">integer</span></td>
                             <td><span class="param-optional">optional</span></td>
                             <td><span class="param-default">862</span></td>
-                            <td>TWAMP server port</td>
+                            <td>TWAMP control port</td>
                         </tr>
                         <tr>
                             <td><span class="param-name">count</span></td>
@@ -1203,13 +1618,6 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                             <td><span class="param-optional">optional</span></td>
                             <td><span class="param-default">10</span></td>
                             <td>Number of test probes to send</td>
-                        </tr>
-                        <tr>
-                            <td><span class="param-name">padding</span></td>
-                            <td><span class="param-type">integer</span></td>
-                            <td><span class="param-optional">optional</span></td>
-                            <td><span class="param-default">42</span></td>
-                            <td>Padding bytes in test packets</td>
                         </tr>
                     </tbody>
                 </table>
@@ -1236,13 +1644,24 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
                         </thead>
                         <tbody>
                             <tr><td><span class="param-name">server</span></td><td>Target server hostname</td></tr>
-                            <tr><td><span class="param-name">port</span></td><td>Target server port</td></tr>
+                            <tr><td><span class="param-name">local_endpoint</span></td><td>Local test endpoint (IP:port)</td></tr>
+                            <tr><td><span class="param-name">remote_endpoint</span></td><td>Remote test endpoint (IP:port)</td></tr>
                             <tr><td><span class="param-name">probes</span></td><td>Number of probes sent</td></tr>
                             <tr><td><span class="param-name">loss_percent</span></td><td>Packet loss percentage</td></tr>
-                            <tr><td><span class="param-name">rtt_min_ms</span></td><td>Minimum RTT in milliseconds</td></tr>
-                            <tr><td><span class="param-name">rtt_max_ms</span></td><td>Maximum RTT in milliseconds</td></tr>
-                            <tr><td><span class="param-name">rtt_avg_ms</span></td><td>Average RTT in milliseconds</td></tr>
-                            <tr><td><span class="param-name">rtt_stddev_ms</span></td><td>RTT standard deviation in milliseconds</td></tr>
+                            <tr><td><span class="param-name">rtt_*_ms</span></td><td>Network RTT without reflector processing (min, max, avg, stddev)</td></tr>
+                            <tr><td><span class="param-name">rtt_raw_ms</span></td><td>Raw RTT including reflector turnaround (min, max, avg, stddev)</td></tr>
+                            <tr><td><span class="param-name">reflector_turnaround_ms</span></td><td>Reflector processing time T3-T2 (min, max, avg)</td></tr>
+                            <tr><td><span class="param-name">estimated_clock_offset_ms</span></td><td>Estimated clock offset between sender and reflector</td></tr>
+                            <tr><td><span class="param-name">sync_status</span></td><td>Clock sync status with Error Estimate details (RFC 4656)</td></tr>
+                            <tr><td><span class="param-name">forward_delay_raw_ms</span></td><td>Raw forward delay (min, max, avg) - affected by clock offset</td></tr>
+                            <tr><td><span class="param-name">forward_delay_corrected_ms</span></td><td>Corrected forward delay assuming symmetric path (min, max, avg)</td></tr>
+                            <tr><td><span class="param-name">forward_ipdv_ms</span></td><td>RFC 3393 IP Packet Delay Variation (min, max, avg, mean_abs)</td></tr>
+                            <tr><td><span class="param-name">forward_jitter_ms</span></td><td>RFC 3550 Jitter - exponentially smoothed mean absolute IPDV</td></tr>
+                            <tr><td><span class="param-name">reverse_delay_raw_ms</span></td><td>Raw reverse delay (min, max, avg) - affected by clock offset</td></tr>
+                            <tr><td><span class="param-name">reverse_delay_corrected_ms</span></td><td>Corrected reverse delay assuming symmetric path (min, max, avg)</td></tr>
+                            <tr><td><span class="param-name">reverse_ipdv_ms</span></td><td>RFC 3393 IP Packet Delay Variation (min, max, avg, mean_abs)</td></tr>
+                            <tr><td><span class="param-name">reverse_jitter_ms</span></td><td>RFC 3550 Jitter - exponentially smoothed mean absolute IPDV</td></tr>
+                            <tr><td><span class="param-name">hops</span></td><td>Hop counts derived from TTL (forward/reverse with min, max, avg)</td></tr>
                         </tbody>
                     </table>
 
@@ -1252,15 +1671,33 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
   "status": "ok",
   "data": {
     "server": "twamp.example.com",
-    "port": 862,
+    "local_endpoint": "192.168.1.100:19234",
+    "remote_endpoint": "203.0.113.50:18760",
     "probes": 20,
     "loss_percent": 0.0,
-    "rtt_min_ms": 1.2,
-    "rtt_max_ms": 5.8,
-    "rtt_avg_ms": 2.5,
-    "rtt_stddev_ms": 0.9
+    "rtt_min_ms": 28.5,
+    "rtt_max_ms": 35.2,
+    "rtt_avg_ms": 31.8,
+    "rtt_stddev_ms": 1.2,
+    "reflector_turnaround_ms": {"min": 0.05, "max": 0.15, "avg": 0.08},
+    "estimated_clock_offset_ms": 0.15,
+    "sync_status": {"sender_synced": true, "reflector_synced": true, "both_synced": true},
+    "forward_delay_raw_ms": {"min": 14.1, "max": 17.8, "avg": 15.9},
+    "forward_delay_corrected_ms": {"min": 14.25, "max": 17.6, "avg": 15.9},
+    "forward_ipdv_ms": {"min": -1.2, "max": 1.5, "avg": 0.01, "mean_abs": 0.45},
+    "forward_jitter_ms": 0.52,
+    "reverse_delay_raw_ms": {"min": 14.2, "max": 17.6, "avg": 15.9},
+    "reverse_delay_corrected_ms": {"min": 14.25, "max": 17.6, "avg": 15.9},
+    "reverse_ipdv_ms": {"min": -1.1, "max": 1.3, "avg": -0.02, "mean_abs": 0.42},
+    "reverse_jitter_ms": 0.48,
+    "hops": {"forward": {"min": 10, "max": 10, "avg": 10}, "reverse": {"min": 10, "max": 10, "avg": 10}}
   }
 }</pre>
+                    </div>
+
+                    <div class="tip">
+                        <div class="tip-title">Jitter Measurement (RFC 3393 &amp; RFC 3550)</div>
+                        Jitter is calculated using RFC-compliant methods. IPDV (IP Packet Delay Variation, RFC 3393) measures the difference in delay between consecutive packets - clock offset cancels out, giving true one-way delay variation. The jitter value uses RFC 3550's exponentially smoothed mean absolute IPDV. Hop counts are derived from TTL values.
                     </div>
                 </div>
             </div>
