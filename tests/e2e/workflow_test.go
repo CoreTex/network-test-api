@@ -345,8 +345,11 @@ func TestE2E_UnreachableServer(t *testing.T) {
 	defer ts.Close()
 
 	testBody := `{"server_host": "unreachable.example.com"}`
-	resp, _ := http.Post(ts.URL()+"/iperf/client/run", "application/json",
+	resp, err := http.Post(ts.URL()+"/iperf/client/run", "application/json",
 		bytes.NewBufferString(testBody))
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusInternalServerError {

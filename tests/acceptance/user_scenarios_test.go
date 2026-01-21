@@ -227,7 +227,10 @@ func TestAcceptance_DiscoverAPIDocumentation(t *testing.T) {
 	defer server.Close()
 
 	// User browses to root endpoint in browser (HTML)
-	resp, _ := http.Get(server.URL() + "/")
+	resp, err := http.Get(server.URL() + "/")
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	if !strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
@@ -235,13 +238,19 @@ func TestAcceptance_DiscoverAPIDocumentation(t *testing.T) {
 	}
 
 	// User requests JSON schema programmatically
-	req, _ := http.NewRequest("GET", server.URL()+"/", nil)
+	req, err := http.NewRequest("GET", server.URL()+"/", nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, _ = http.DefaultClient.Do(req)
-	defer resp.Body.Close()
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer resp2.Body.Close()
 
 	var doc ApiResponse
-	json.NewDecoder(resp.Body).Decode(&doc)
+	json.NewDecoder(resp2.Body).Decode(&doc)
 
 	if doc.Data["version"] == nil {
 		t.Error("Expected version in API documentation")
@@ -297,8 +306,11 @@ func TestAcceptance_RunDownloadTest(t *testing.T) {
 		"reverse": true
 	}`
 
-	resp, _ := http.Post(server.URL()+"/iperf/client/run", "application/json",
+	resp, err := http.Post(server.URL()+"/iperf/client/run", "application/json",
 		bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	var result ApiResponse
@@ -320,8 +332,11 @@ func TestAcceptance_RunUDPTest(t *testing.T) {
 		"bandwidth": 50
 	}`
 
-	resp, _ := http.Post(server.URL()+"/iperf/client/run", "application/json",
+	resp, err := http.Post(server.URL()+"/iperf/client/run", "application/json",
 		bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	var result ApiResponse
@@ -342,8 +357,11 @@ func TestAcceptance_RunLatencyTest(t *testing.T) {
 		"count": 50
 	}`
 
-	resp, _ := http.Post(server.URL()+"/twamp/client/run", "application/json",
+	resp, err := http.Post(server.URL()+"/twamp/client/run", "application/json",
 		bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	var result ApiResponse
@@ -367,8 +385,11 @@ func TestAcceptance_JitterMeasurement(t *testing.T) {
 	defer server.Close()
 
 	body := `{"server_host": "twamp.example.com", "count": 100}`
-	resp, _ := http.Post(server.URL()+"/twamp/client/run", "application/json",
+	resp, err := http.Post(server.URL()+"/twamp/client/run", "application/json",
 		bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	var result ApiResponse
@@ -397,8 +418,11 @@ func TestAcceptance_HopCountTracking(t *testing.T) {
 	defer server.Close()
 
 	body := `{"server_host": "twamp.example.com"}`
-	resp, _ := http.Post(server.URL()+"/twamp/client/run", "application/json",
+	resp, err := http.Post(server.URL()+"/twamp/client/run", "application/json",
 		bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	var result ApiResponse
@@ -426,8 +450,11 @@ func TestAcceptance_ClockSyncStatus(t *testing.T) {
 	defer server.Close()
 
 	body := `{"server_host": "twamp.example.com"}`
-	resp, _ := http.Post(server.URL()+"/twamp/client/run", "application/json",
+	resp, err := http.Post(server.URL()+"/twamp/client/run", "application/json",
 		bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	var result ApiResponse
@@ -455,8 +482,11 @@ func TestAcceptance_PacketLossReporting(t *testing.T) {
 	defer server.Close()
 
 	body := `{"server_host": "lossy.server.com"}`
-	resp, _ := http.Post(server.URL()+"/twamp/client/run", "application/json",
+	resp, err := http.Post(server.URL()+"/twamp/client/run", "application/json",
 		bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	var result ApiResponse
@@ -487,8 +517,11 @@ func TestAcceptance_ClearErrorMessages(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		resp, _ := http.Post(server.URL()+"/iperf/client/run", "application/json",
+		resp, err := http.Post(server.URL()+"/iperf/client/run", "application/json",
 			bytes.NewBufferString(tc.body))
+		if err != nil {
+			t.Fatalf("%s: Request failed: %v", tc.name, err)
+		}
 
 		var result ApiResponse
 		json.NewDecoder(resp.Body).Decode(&result)
@@ -509,8 +542,11 @@ func TestAcceptance_ServerBusyHandling(t *testing.T) {
 	defer server.Close()
 
 	body := `{"server_host": "busy.server.com"}`
-	resp, _ := http.Post(server.URL()+"/iperf/client/run", "application/json",
+	resp, err := http.Post(server.URL()+"/iperf/client/run", "application/json",
 		bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	var result ApiResponse
@@ -541,11 +577,15 @@ func TestAcceptance_ConsistentResponseStructure(t *testing.T) {
 
 	for _, ep := range endpoints {
 		var resp *http.Response
+		var err error
 		if ep.method == "GET" {
-			resp, _ = http.Get(server.URL() + ep.path)
+			resp, err = http.Get(server.URL() + ep.path)
 		} else {
-			resp, _ = http.Post(server.URL()+ep.path, "application/json",
+			resp, err = http.Post(server.URL()+ep.path, "application/json",
 				bytes.NewBufferString(ep.body))
+		}
+		if err != nil {
+			t.Fatalf("%s: Request failed: %v", ep.path, err)
 		}
 
 		contentType := resp.Header.Get("Content-Type")
