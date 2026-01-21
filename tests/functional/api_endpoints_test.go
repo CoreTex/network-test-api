@@ -36,14 +36,14 @@ func mockIperfHandlerFunctional(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: err.Error()})
+		_ = json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: err.Error()})
 		return
 	}
 
 	if req.ServerHost == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: "server_host is required"})
+		_ = json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: "server_host is required"})
 		return
 	}
 
@@ -56,10 +56,7 @@ func mockIperfHandlerFunctional(w http.ResponseWriter, r *http.Request) {
 	if duration == 0 {
 		duration = 5
 	}
-	parallel := req.Parallel
-	if parallel == 0 {
-		parallel = 1
-	}
+	// parallel is ignored in mock response
 	protocol := req.Protocol
 	if protocol == "" {
 		protocol = "TCP"
@@ -85,7 +82,7 @@ func mockIperfHandlerFunctional(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(ApiResponse{Status: "ok", Data: data})
+	_ = json.NewEncoder(w).Encode(ApiResponse{Status: "ok", Data: data})
 }
 
 func mockTwampHandlerFunctional(w http.ResponseWriter, r *http.Request) {
@@ -93,14 +90,14 @@ func mockTwampHandlerFunctional(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: err.Error()})
+		_ = json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: err.Error()})
 		return
 	}
 
 	if req.ServerHost == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: "server_host is required"})
+		_ = json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: "server_host is required"})
 		return
 	}
 
@@ -136,13 +133,13 @@ func mockTwampHandlerFunctional(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(ApiResponse{Status: "ok", Data: data})
+	_ = json.NewEncoder(w).Encode(ApiResponse{Status: "ok", Data: data})
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(ApiResponse{Status: "healthy"})
+	_ = json.NewEncoder(w).Encode(ApiResponse{Status: "healthy"})
 }
 
 func rootHandler(w http.ResponseWriter, r *http.Request) {
@@ -151,7 +148,7 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	if contentType == "application/json" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(ApiResponse{
+		_ = json.NewEncoder(w).Encode(ApiResponse{
 			Status: "ok",
 			Data: map[string]interface{}{
 				"name":    "Network Test API",
@@ -163,7 +160,7 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("<html><body><h1>Network Test API</h1></body></html>"))
+	_, _ = w.Write([]byte("<html><body><h1>Network Test API</h1></body></html>"))
 }
 
 func setupFunctionalRouter() *mux.Router {
@@ -191,7 +188,7 @@ func TestIperf_TCPUpload(t *testing.T) {
 	}
 
 	var resp ApiResponse
-	json.NewDecoder(rr.Body).Decode(&resp)
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
 
 	if resp.Data["protocol"] != "TCP" {
 		t.Errorf("Expected protocol=TCP, got %v", resp.Data["protocol"])
@@ -215,7 +212,7 @@ func TestIperf_TCPDownload(t *testing.T) {
 	router.ServeHTTP(rr, req)
 
 	var resp ApiResponse
-	json.NewDecoder(rr.Body).Decode(&resp)
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
 
 	if resp.Data["received_bytes"] == nil {
 		t.Error("Expected received_bytes in download mode")
@@ -236,7 +233,7 @@ func TestIperf_UDPMode(t *testing.T) {
 	router.ServeHTTP(rr, req)
 
 	var resp ApiResponse
-	json.NewDecoder(rr.Body).Decode(&resp)
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
 
 	if resp.Data["protocol"] != "UDP" {
 		t.Errorf("Expected protocol=UDP, got %v", resp.Data["protocol"])
@@ -272,7 +269,7 @@ func TestIperf_CustomPort(t *testing.T) {
 	router.ServeHTTP(rr, req)
 
 	var resp ApiResponse
-	json.NewDecoder(rr.Body).Decode(&resp)
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
 
 	if resp.Data["port"].(float64) != 5202 {
 		t.Errorf("Expected port=5202, got %v", resp.Data["port"])
@@ -295,7 +292,7 @@ func TestTwamp_BasicTest(t *testing.T) {
 	}
 
 	var resp ApiResponse
-	json.NewDecoder(rr.Body).Decode(&resp)
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
 
 	// Check RTT fields
 	if resp.Data["rtt_avg_ms"] == nil {
@@ -323,7 +320,7 @@ func TestTwamp_JitterFields(t *testing.T) {
 	router.ServeHTTP(rr, req)
 
 	var resp ApiResponse
-	json.NewDecoder(rr.Body).Decode(&resp)
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
 
 	// Check jitter fields (RFC 3550)
 	if resp.Data["forward_jitter_ms"] == nil {
@@ -345,7 +342,7 @@ func TestTwamp_HopFields(t *testing.T) {
 	router.ServeHTTP(rr, req)
 
 	var resp ApiResponse
-	json.NewDecoder(rr.Body).Decode(&resp)
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
 
 	// Check hops field
 	hops, ok := resp.Data["hops"].(map[string]interface{})
@@ -372,7 +369,7 @@ func TestTwamp_SyncStatus(t *testing.T) {
 	router.ServeHTTP(rr, req)
 
 	var resp ApiResponse
-	json.NewDecoder(rr.Body).Decode(&resp)
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
 
 	// Check sync_status field
 	syncStatus, ok := resp.Data["sync_status"].(map[string]interface{})
@@ -402,7 +399,7 @@ func TestTwamp_Endpoints(t *testing.T) {
 	router.ServeHTTP(rr, req)
 
 	var resp ApiResponse
-	json.NewDecoder(rr.Body).Decode(&resp)
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
 
 	if resp.Data["local_endpoint"] == nil {
 		t.Error("Expected local_endpoint field")
@@ -515,7 +512,7 @@ func TestErrorHandling_MissingRequiredField(t *testing.T) {
 	}
 
 	var resp ApiResponse
-	json.NewDecoder(rr.Body).Decode(&resp)
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
 
 	if resp.Status != "error" {
 		t.Errorf("Expected status=error, got %s", resp.Status)

@@ -32,14 +32,14 @@ func NewTestServer() *TestServer {
 	// Health endpoint
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
 	}).Methods("GET")
 
 	// Root endpoint with content negotiation
 	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Content-Type") == "application/json" {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(ApiResponse{
+			_ = json.NewEncoder(w).Encode(ApiResponse{
 				Status: "ok",
 				Data: map[string]interface{}{
 					"name":        "Network Test API",
@@ -50,7 +50,7 @@ func NewTestServer() *TestServer {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html")
-		w.Write([]byte("<html><body><h1>Network Test API v2.2.0</h1></body></html>"))
+		_, _ = w.Write([]byte("<html><body><h1>Network Test API v2.2.0</h1></body></html>"))
 	}).Methods("GET")
 
 	// iperf3 endpoint with full workflow simulation
@@ -59,7 +59,7 @@ func NewTestServer() *TestServer {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: err.Error()})
+			_ = json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: err.Error()})
 			return
 		}
 
@@ -67,7 +67,7 @@ func NewTestServer() *TestServer {
 		if !ok || serverHost == "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: "server_host is required"})
+			_ = json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: "server_host is required"})
 			return
 		}
 
@@ -75,7 +75,7 @@ func NewTestServer() *TestServer {
 		if serverHost == "unreachable.example.com" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(ApiResponse{
+			_ = json.NewEncoder(w).Encode(ApiResponse{
 				Status: "error",
 				Error:  "connect to unreachable.example.com:5201 failed: connection refused",
 			})
@@ -126,7 +126,7 @@ func NewTestServer() *TestServer {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ApiResponse{Status: "ok", Data: data})
+		_ = json.NewEncoder(w).Encode(ApiResponse{Status: "ok", Data: data})
 	}).Methods("POST")
 
 	// TWAMP endpoint with full workflow simulation
@@ -135,7 +135,7 @@ func NewTestServer() *TestServer {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: err.Error()})
+			_ = json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: err.Error()})
 			return
 		}
 
@@ -143,7 +143,7 @@ func NewTestServer() *TestServer {
 		if !ok || serverHost == "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: "server_host is required"})
+			_ = json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: "server_host is required"})
 			return
 		}
 
@@ -151,7 +151,7 @@ func NewTestServer() *TestServer {
 		if serverHost == "unreachable.example.com" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(ApiResponse{
+			_ = json.NewEncoder(w).Encode(ApiResponse{
 				Status: "error",
 				Error:  "Connect failed: dial tcp: connection refused",
 			})
@@ -197,7 +197,7 @@ func NewTestServer() *TestServer {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ApiResponse{Status: "ok", Data: data})
+		_ = json.NewEncoder(w).Encode(ApiResponse{Status: "ok", Data: data})
 	}).Methods("POST")
 
 	server := httptest.NewServer(r)
@@ -229,7 +229,7 @@ func TestE2E_Iperf3BandwidthTest_Complete(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("Health check returned %d", resp.StatusCode)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	// Step 2: Get API documentation
 	req, _ := http.NewRequest("GET", ts.URL()+"/", nil)
@@ -239,8 +239,8 @@ func TestE2E_Iperf3BandwidthTest_Complete(t *testing.T) {
 		t.Fatalf("Get docs failed: %v", err)
 	}
 	var docResp ApiResponse
-	json.NewDecoder(resp.Body).Decode(&docResp)
-	resp.Body.Close()
+	_ = json.NewDecoder(resp.Body).Decode(&docResp)
+	_ = resp.Body.Close()
 
 	if docResp.Data["version"] != "2.2.0" {
 		t.Errorf("Expected version 2.2.0, got %v", docResp.Data["version"])
@@ -259,14 +259,14 @@ func TestE2E_Iperf3BandwidthTest_Complete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("iperf3 test failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("iperf3 test returned %d", resp.StatusCode)
 	}
 
 	var testResp ApiResponse
-	json.NewDecoder(resp.Body).Decode(&testResp)
+	_ = json.NewDecoder(resp.Body).Decode(&testResp)
 
 	// Verify complete response
 	if testResp.Status != "ok" {
@@ -290,7 +290,7 @@ func TestE2E_TwampLatencyTest_Complete(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("Health check failed")
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	// Step 2: Run TWAMP test
 	testBody := `{
@@ -302,10 +302,10 @@ func TestE2E_TwampLatencyTest_Complete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TWAMP test failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var testResp ApiResponse
-	json.NewDecoder(resp.Body).Decode(&testResp)
+	_ = json.NewDecoder(resp.Body).Decode(&testResp)
 
 	// Verify all required fields
 	requiredFields := []string{
@@ -350,14 +350,14 @@ func TestE2E_UnreachableServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Errorf("Expected 500 for unreachable server, got %d", resp.StatusCode)
 	}
 
 	var errResp ApiResponse
-	json.NewDecoder(resp.Body).Decode(&errResp)
+	_ = json.NewDecoder(resp.Body).Decode(&errResp)
 
 	if errResp.Status != "error" {
 		t.Errorf("Expected status=error, got %s", errResp.Status)
@@ -384,7 +384,7 @@ func TestE2E_SequentialTests(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("Test %d: expected 200, got %d", i, resp.StatusCode)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 }
 
@@ -407,8 +407,8 @@ func TestE2E_DifferentProtocols(t *testing.T) {
 			bytes.NewBufferString(p.body))
 
 		var result ApiResponse
-		json.NewDecoder(resp.Body).Decode(&result)
-		resp.Body.Close()
+		_ = json.NewDecoder(resp.Body).Decode(&result)
+		_ = resp.Body.Close()
 
 		if result.Data["protocol"] != p.expected {
 			t.Errorf("%s: expected protocol=%s, got %v", p.name, p.expected, result.Data["protocol"])
@@ -426,8 +426,8 @@ func TestE2E_UploadDownloadModes(t *testing.T) {
 	resp, _ := http.Post(ts.URL()+"/iperf/client/run", "application/json",
 		bytes.NewBufferString(uploadBody))
 	var uploadResult ApiResponse
-	json.NewDecoder(resp.Body).Decode(&uploadResult)
-	resp.Body.Close()
+	_ = json.NewDecoder(resp.Body).Decode(&uploadResult)
+	_ = resp.Body.Close()
 
 	if uploadResult.Data["sent_bytes"] == nil {
 		t.Error("Upload should have sent_bytes")
@@ -441,8 +441,8 @@ func TestE2E_UploadDownloadModes(t *testing.T) {
 	resp, _ = http.Post(ts.URL()+"/iperf/client/run", "application/json",
 		bytes.NewBufferString(downloadBody))
 	var downloadResult ApiResponse
-	json.NewDecoder(resp.Body).Decode(&downloadResult)
-	resp.Body.Close()
+	_ = json.NewDecoder(resp.Body).Decode(&downloadResult)
+	_ = resp.Body.Close()
 
 	if downloadResult.Data["received_bytes"] == nil {
 		t.Error("Download should have received_bytes")
@@ -463,7 +463,7 @@ func TestE2E_ContentNegotiation(t *testing.T) {
 	if contentType != "text/html" {
 		t.Errorf("Default should return HTML, got %s", contentType)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	// Request JSON
 	req, _ := http.NewRequest("GET", ts.URL()+"/", nil)
@@ -473,5 +473,5 @@ func TestE2E_ContentNegotiation(t *testing.T) {
 	if contentType != "application/json" {
 		t.Errorf("With Content-Type: application/json should return JSON, got %s", contentType)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }

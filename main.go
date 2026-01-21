@@ -97,8 +97,6 @@ type Iperf3Client struct {
 	controlConn net.Conn
 	cookie      []byte
 	streams     []net.Conn
-
-	mu sync.Mutex
 }
 
 const DEFAULT_BANDWIDTH = 100 * 1000 * 1000 // 100 Mbit/s default
@@ -136,7 +134,7 @@ func generateCookie() []byte {
 	cookie := make([]byte, COOKIE_SIZE)
 	for i := 0; i < COOKIE_SIZE-1; i++ {
 		b := make([]byte, 1)
-		rand.Read(b)
+		_, _ = rand.Read(b)
 		cookie[i] = chars[int(b[0])%len(chars)]
 	}
 	cookie[COOKIE_SIZE-1] = 0 // null terminator
@@ -233,7 +231,7 @@ func (c *Iperf3Client) writeJSON(v interface{}) error {
 
 // Connect to iperf3 server
 func (c *Iperf3Client) Connect() error {
-	target := fmt.Sprintf("%s:%d", c.Host, c.Port)
+	target := net.JoinHostPort(c.Host, fmt.Sprintf("%d", c.Port))
 
 	conn, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
@@ -243,13 +241,13 @@ func (c *Iperf3Client) Connect() error {
 
 	// Set TCP_NODELAY for control connection
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		tcpConn.SetNoDelay(true)
+		_ = tcpConn.SetNoDelay(true)
 	}
 
 	// Send cookie (37 bytes including null terminator)
 	_, err = c.controlConn.Write(c.cookie)
 	if err != nil {
-		c.controlConn.Close()
+		_ = c.controlConn.Close()
 		return fmt.Errorf("send cookie failed: %w", err)
 	}
 
@@ -313,7 +311,7 @@ func (c *Iperf3Client) CreateStreams() error {
 		return fmt.Errorf("unexpected state %d, expected CREATE_STREAMS(%d)", state, CREATE_STREAMS)
 	}
 
-	target := fmt.Sprintf("%s:%d", c.Host, c.Port)
+	target := net.JoinHostPort(c.Host, fmt.Sprintf("%d", c.Port))
 
 	for i := 0; i < c.Parallel; i++ {
 		var conn net.Conn
@@ -331,7 +329,7 @@ func (c *Iperf3Client) CreateStreams() error {
 		// Send cookie to identify this stream
 		_, err = conn.Write(c.cookie)
 		if err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return fmt.Errorf("send cookie on stream %d: %w", i, err)
 		}
 
@@ -391,7 +389,7 @@ func (c *Iperf3Client) RunTest() (*Iperf3Result, error) {
 	result.BandwidthMbps = (float64(totalBytes) * 8) / (result.Duration * 1e6)
 
 	// Signal TEST_END
-	c.writeState(TEST_END)
+	_ = c.writeState(TEST_END)
 
 	// Wait for EXCHANGE_RESULTS
 	state, err = c.readState()
@@ -402,17 +400,17 @@ func (c *Iperf3Client) RunTest() (*Iperf3Result, error) {
 	// Exchange results (simplified - just acknowledge)
 	if state == EXCHANGE_RESULTS {
 		// Send empty results
-		c.writeJSON(map[string]interface{}{})
+		_ = c.writeJSON(map[string]interface{}{})
 
 		// Read server results (ignore for now)
 		var serverResults map[string]interface{}
-		c.readJSON(&serverResults)
+		_ = c.readJSON(&serverResults)
 	}
 
 	// Wait for DISPLAY_RESULTS
 	state, _ = c.readState()
 	if state == DISPLAY_RESULTS {
-		c.writeState(IPERF_DONE)
+		_ = c.writeState(IPERF_DONE)
 	}
 
 	log.Printf("iperf3: Test completed - %.2f Mbps", result.BandwidthMbps)
@@ -435,7 +433,7 @@ func (c *Iperf3Client) sendData(deadline time.Time) int64 {
 	}
 
 	buffer := make([]byte, chunkSize)
-	rand.Read(buffer)
+	_, _ = rand.Read(buffer)
 
 	for _, stream := range c.streams {
 		wg.Add(1)
@@ -444,7 +442,7 @@ func (c *Iperf3Client) sendData(deadline time.Time) int64 {
 
 			var streamBytes int64
 			startTime := time.Now()
-			conn.SetWriteDeadline(deadline)
+			_ = conn.SetWriteDeadline(deadline)
 
 			for time.Now().Before(deadline) {
 				n, err := conn.Write(buffer)
@@ -492,7 +490,7 @@ func (c *Iperf3Client) receiveData(deadline time.Time) int64 {
 			defer wg.Done()
 
 			var streamBytes int64
-			conn.SetReadDeadline(deadline)
+			_ = conn.SetReadDeadline(deadline)
 
 			for time.Now().Before(deadline) {
 				n, err := conn.Read(buffer)
@@ -515,10 +513,10 @@ func (c *Iperf3Client) receiveData(deadline time.Time) int64 {
 // Close all connections
 func (c *Iperf3Client) Close() {
 	for _, stream := range c.streams {
-		stream.Close()
+		_ = stream.Close()
 	}
 	if c.controlConn != nil {
-		c.controlConn.Close()
+		_ = c.controlConn.Close()
 	}
 }
 
@@ -651,7 +649,7 @@ func twampClientRun(w http.ResponseWriter, r *http.Request) {
 		}, http.StatusInternalServerError)
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Use random port in perfSONAR's allowed range to avoid conflicts
 	senderPort := twampPortMin + mathrand.Intn(twampPortMax-twampPortMin)
@@ -673,7 +671,7 @@ func twampClientRun(w http.ResponseWriter, r *http.Request) {
 		}, http.StatusInternalServerError)
 		return
 	}
-	defer session.Stop()
+	defer func() { _ = session.Stop() }()
 
 	test, err := session.CreateTest()
 	if err != nil {
@@ -777,7 +775,7 @@ func twampClientRun(w http.ResponseWriter, r *http.Request) {
 
 		// Calculate hop counts from TTL values
 		// Forward: Sender sends with TTL=255, SenderTTL is what reflector received
-		if r.SenderTTL > 0 && r.SenderTTL <= 255 {
+		if r.SenderTTL > 0 {
 			fwdHops := 255 - int(r.SenderTTL)
 			if hopsCount == 0 {
 				fwdHopsMin, fwdHopsMax = fwdHops, fwdHops
@@ -1079,7 +1077,7 @@ func twampClientRun(w http.ResponseWriter, r *http.Request) {
 func jsonResponse(w http.ResponseWriter, resp ApiResponse, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func getAPIDoc() map[string]interface{} {
@@ -1739,11 +1737,11 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
     </footer>
 </body>
 </html>`
-	html := strings.Replace(htmlTemplate, "{{VERSION}}", API_VERSION, -1)
+	html := strings.ReplaceAll(htmlTemplate, "{{VERSION}}", API_VERSION)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(html))
+	_, _ = w.Write([]byte(html))
 }
 
 func main() {

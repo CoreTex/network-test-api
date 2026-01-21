@@ -31,14 +31,14 @@ func NewAcceptanceServer() *AcceptanceServer {
 	// Health check
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
 	}).Methods("GET")
 
 	// Root endpoint
 	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Content-Type") == "application/json" {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(ApiResponse{
+			_ = json.NewEncoder(w).Encode(ApiResponse{
 				Status: "ok",
 				Data: map[string]interface{}{
 					"name":        "Network Test API",
@@ -54,7 +54,7 @@ func NewAcceptanceServer() *AcceptanceServer {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(`<!DOCTYPE html>
+		_, _ = w.Write([]byte(`<!DOCTYPE html>
 <html><head><title>Network Test API</title></head>
 <body><h1>Network Test API v2.2.0</h1>
 <p>Endpoints: /iperf/client/run, /twamp/client/run, /health</p>
@@ -67,7 +67,7 @@ func NewAcceptanceServer() *AcceptanceServer {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: err.Error()})
+			_ = json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: err.Error()})
 			return
 		}
 
@@ -75,7 +75,7 @@ func NewAcceptanceServer() *AcceptanceServer {
 		if serverHost == "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: "server_host is required"})
+			_ = json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: "server_host is required"})
 			return
 		}
 
@@ -83,7 +83,7 @@ func NewAcceptanceServer() *AcceptanceServer {
 		if serverHost == "busy.server.com" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: "server denied access"})
+			_ = json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: "server denied access"})
 			return
 		}
 
@@ -119,7 +119,7 @@ func NewAcceptanceServer() *AcceptanceServer {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ApiResponse{Status: "ok", Data: data})
+		_ = json.NewEncoder(w).Encode(ApiResponse{Status: "ok", Data: data})
 	}).Methods("POST")
 
 	// TWAMP endpoint
@@ -128,7 +128,7 @@ func NewAcceptanceServer() *AcceptanceServer {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: err.Error()})
+			_ = json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: err.Error()})
 			return
 		}
 
@@ -136,7 +136,7 @@ func NewAcceptanceServer() *AcceptanceServer {
 		if serverHost == "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: "server_host is required"})
+			_ = json.NewEncoder(w).Encode(ApiResponse{Status: "error", Error: "server_host is required"})
 			return
 		}
 
@@ -182,7 +182,7 @@ func NewAcceptanceServer() *AcceptanceServer {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ApiResponse{Status: "ok", Data: data})
+		_ = json.NewEncoder(w).Encode(ApiResponse{Status: "ok", Data: data})
 	}).Methods("POST")
 
 	server := httptest.NewServer(r)
@@ -207,14 +207,14 @@ func TestAcceptance_VerifyAPIAvailability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to check API health: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("API is not healthy: status %d", resp.StatusCode)
 	}
 
 	var health map[string]string
-	json.NewDecoder(resp.Body).Decode(&health)
+	_ = json.NewDecoder(resp.Body).Decode(&health)
 
 	if health["status"] != "healthy" {
 		t.Errorf("Expected healthy status, got %s", health["status"])
@@ -231,7 +231,7 @@ func TestAcceptance_DiscoverAPIDocumentation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if !strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
 		t.Error("Expected HTML documentation by default")
@@ -247,10 +247,10 @@ func TestAcceptance_DiscoverAPIDocumentation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 
 	var doc ApiResponse
-	json.NewDecoder(resp2.Body).Decode(&doc)
+	_ = json.NewDecoder(resp2.Body).Decode(&doc)
 
 	if doc.Data["version"] == nil {
 		t.Error("Expected version in API documentation")
@@ -276,10 +276,10 @@ func TestAcceptance_RunBandwidthTest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to run bandwidth test: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result ApiResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	_ = json.NewDecoder(resp.Body).Decode(&result)
 
 	// Verify user can see the results they care about
 	if result.Status != "ok" {
@@ -311,10 +311,10 @@ func TestAcceptance_RunDownloadTest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result ApiResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	_ = json.NewDecoder(resp.Body).Decode(&result)
 
 	if result.Data["received_bytes"] == nil {
 		t.Error("Download test should show received bytes")
@@ -337,10 +337,10 @@ func TestAcceptance_RunUDPTest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result ApiResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	_ = json.NewDecoder(resp.Body).Decode(&result)
 
 	if result.Data["protocol"] != "UDP" {
 		t.Errorf("Expected UDP protocol, got %v", result.Data["protocol"])
@@ -362,10 +362,10 @@ func TestAcceptance_RunLatencyTest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result ApiResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	_ = json.NewDecoder(resp.Body).Decode(&result)
 
 	// Verify user can see latency metrics
 	if result.Data["rtt_avg_ms"] == nil {
@@ -390,10 +390,10 @@ func TestAcceptance_JitterMeasurement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result ApiResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	_ = json.NewDecoder(resp.Body).Decode(&result)
 
 	// User should see RFC 3550 jitter values
 	if result.Data["forward_jitter_ms"] == nil {
@@ -423,10 +423,10 @@ func TestAcceptance_HopCountTracking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result ApiResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	_ = json.NewDecoder(resp.Body).Decode(&result)
 
 	hops, ok := result.Data["hops"].(map[string]interface{})
 	if !ok {
@@ -455,10 +455,10 @@ func TestAcceptance_ClockSyncStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result ApiResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	_ = json.NewDecoder(resp.Body).Decode(&result)
 
 	syncStatus, ok := result.Data["sync_status"].(map[string]interface{})
 	if !ok {
@@ -487,10 +487,10 @@ func TestAcceptance_PacketLossReporting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result ApiResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	_ = json.NewDecoder(resp.Body).Decode(&result)
 
 	if result.Data["loss_percent"] == nil {
 		t.Error("User should see packet loss percentage")
@@ -524,8 +524,8 @@ func TestAcceptance_ClearErrorMessages(t *testing.T) {
 		}
 
 		var result ApiResponse
-		json.NewDecoder(resp.Body).Decode(&result)
-		resp.Body.Close()
+		_ = json.NewDecoder(resp.Body).Decode(&result)
+		_ = resp.Body.Close()
 
 		if result.Status != "error" {
 			t.Errorf("%s: expected error status", tc.name)
@@ -547,10 +547,10 @@ func TestAcceptance_ServerBusyHandling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result ApiResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	_ = json.NewDecoder(resp.Body).Decode(&result)
 
 	if result.Status != "error" {
 		t.Error("Expected error for busy server")
@@ -598,6 +598,6 @@ func TestAcceptance_ConsistentResponseStructure(t *testing.T) {
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			t.Errorf("%s: response is not valid JSON: %v", ep.path, err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 }

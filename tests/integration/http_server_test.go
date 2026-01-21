@@ -34,7 +34,7 @@ type RunRequest struct {
 func jsonResponse(w http.ResponseWriter, resp ApiResponse, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // Mock handler that simulates iperf validation without actual network test
